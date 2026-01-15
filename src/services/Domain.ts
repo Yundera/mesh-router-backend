@@ -278,3 +278,25 @@ export async function resolveDomainToIp(domainName: string): Promise<{ vpnIp: st
     serverDomain: domainData.domain.serverDomain
   };
 }
+
+/**
+ * Updates the lastSeenOnline timestamp for a user (heartbeat).
+ * @param userId - The user ID
+ * @returns The updated timestamp
+ */
+export async function updateHeartbeat(userId: string): Promise<string> {
+  if (!userId) {
+    throw new Error("User ID is required.");
+  }
+
+  const userData = await getUserDomain(userId);
+  if (!userData) {
+    throw new Error("User not found. Register a domain first.");
+  }
+
+  const lastSeenOnline = new Date().toISOString();
+  const userDocRef = admin.firestore().collection(NSL_ROUTER_COLLECTION).doc(userId);
+  await userDocRef.update({ lastSeenOnline });
+
+  return lastSeenOnline;
+}

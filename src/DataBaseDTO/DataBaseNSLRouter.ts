@@ -8,6 +8,9 @@ export interface NSLRouterData {
     vpnIp?: string;
     vpnIpUpdatedAt?: string;
 
+    // Heartbeat / online status
+    lastSeenOnline?: string;
+
     //meta
     id?: string;
     createdate?: string;

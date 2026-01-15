@@ -1,7 +1,7 @@
 import express from "express";
 import {verifySignature} from "../library/KeyLib.js";
 import {authenticate, AuthUserRequest} from "./ExpressAuthenticateMiddleWare.js";
-import {checkDomainAvailability, deleteUserDomain, getUserDomain, updateUserDomain, registerVpnIp, resolveDomainToIp} from "./Domain.js";
+import {checkDomainAvailability, deleteUserDomain, getUserDomain, updateUserDomain, registerVpnIp, resolveDomainToIp, updateHeartbeat} from "./Domain.js";
 
 /*
 full domain = domainName+"."+serverDomain
@@ -186,6 +186,47 @@ export function routerAPI(expressApp: express.Application) {
       return res.status(200).json(result);
     } catch (error) {
       console.error("Error in GET /resolve/:domain", error);
+      return res.status(500).json({ error: error.toString() });
+    }
+  });
+
+  /**
+   * POST /heartbeat/:userid/:sig
+   * Updates the lastSeenOnline timestamp for a user (heartbeat/keep-alive).
+   * The signature must be a valid Ed25519 signature of the userid using the user's registered public key.
+   */
+  router.post('/heartbeat/:userid/:sig', async (req, res) => {
+    const { userid, sig } = req.params;
+
+    try {
+      const userData = await getUserDomain(userid);
+
+      if (!userData) {
+        return res.status(404).json({ error: "User not found. Register a domain first." });
+      }
+
+      // Verify signature using stored public key
+      let isValid = false;
+      try {
+        isValid = await verifySignature(userData.publicKey, sig, userid);
+      } catch (e) {
+        console.log('Invalid signature format for heartbeat', { userid, error: e.message });
+        return res.status(401).json({ error: "Invalid signature." });
+      }
+
+      if (!isValid) {
+        return res.status(401).json({ error: "Invalid signature." });
+      }
+
+      const lastSeenOnline = await updateHeartbeat(userid);
+      console.log('Heartbeat received', { userid, lastSeenOnline });
+
+      return res.status(200).json({
+        message: "Heartbeat received.",
+        lastSeenOnline
+      });
+    } catch (error) {
+      console.error("Error in POST /heartbeat/:userid/:sig", error);
       return res.status(500).json({ error: error.toString() });
     }
   });
