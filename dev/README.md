@@ -17,7 +17,16 @@ Docker-based development environment for mesh-router-backend with hot reload and
    cp /path/to/your/serviceAccount.json ../config/serviceAccount.json
    ```
 
-2. **Start the development server:**
+2. **Configure environment:**
+   ```bash
+   # Copy the example env file
+   cp .env.example .env
+
+   # Edit .env and set your server domain
+   # SERVER_DOMAIN=nsl.sh
+   ```
+
+3. **Start the development server:**
    ```bash
    # Linux/Mac
    ./start.sh
@@ -26,7 +35,7 @@ Docker-based development environment for mesh-router-backend with hot reload and
    .\start.ps1
    ```
 
-3. **Access the API:**
+4. **Access the API:**
    ```
    http://localhost:8192
    ```
@@ -104,8 +113,15 @@ dev/
 
 | Variable | Description | Default |
 |----------|-------------|---------|
+| `SERVER_DOMAIN` | Server domain suffix for all user domains (e.g., `nsl.sh`) | **Required** |
 | `NODE_ENV` | Node environment | `development` |
 | `GOOGLE_APPLICATION_CREDENTIALS` | Path to Firebase service account | `/app/config/serviceAccount.json` |
+
+Create a `.env` file from the example:
+```bash
+cp .env.example .env
+# Edit .env and set SERVER_DOMAIN=your-domain.com
+```
 
 ## Development Workflow
 
@@ -177,13 +193,16 @@ curl http://localhost:8192/available/myname
 
 # Resolve domain to IP (like DNS)
 curl http://localhost:8192/resolve/myname
-# Response: {"vpnIp":"10.77.0.5","domainName":"myname","serverDomain":"nsl.sh"}
+# Response: {"vpnIp":"10.77.0.5","domainName":"myname","serverDomain":"<SERVER_DOMAIN>"}
 
 # Register IP (requires signature)
 curl -X POST http://localhost:8192/ip/{userid}/{signature} \
   -H "Content-Type: application/json" \
   -d '{"vpnIp": "10.77.0.5"}'
+# Response: {"message":"VPN IP registered successfully.","vpnIp":"10.77.0.5","domain":"myname.<SERVER_DOMAIN>"}
 ```
+
+> **Note:** `serverDomain` in responses comes from the `SERVER_DOMAIN` environment variable.
 
 ## Troubleshooting
 

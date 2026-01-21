@@ -110,6 +110,8 @@ npx dockflow publish
 ```
 src/
 ├── index.ts                    # Express app entry point
+├── configuration/
+│   └── config.ts               # Environment configuration (SERVER_DOMAIN)
 ├── services/
 │   ├── RouterAPI.ts            # API endpoint definitions
 │   ├── Domain.ts               # Domain business logic
@@ -125,6 +127,12 @@ src/
     ├── test-app.ts             # Test app factory
     └── test-helpers.ts         # Test utilities
 ```
+
+## Domain Configuration
+
+The `serverDomain` returned by all API endpoints comes from the `SERVER_DOMAIN` environment variable, not from the database. This allows the same backend to serve different domains (e.g., `nsl.sh` for production, `inojob.com` for staging) without database changes.
+
+The `serverDomain` field stored in Firestore is informational/audit only - it records what the client originally sent but is not used in API responses.
 
 ## References
 
