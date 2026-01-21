@@ -9,6 +9,7 @@ import {
   signMessage,
   getTestUserData,
   cleanupAllTestUsers,
+  TEST_SERVER_DOMAIN,
 } from "./test-helpers.js";
 import type { Application } from "express";
 
@@ -212,7 +213,7 @@ describe("IP Registration API", () => {
 
       expect(response.body.vpnIp).to.equal(vpnIp);
       expect(response.body.domainName).to.equal(domainName);
-      expect(response.body.serverDomain).to.equal("nsl.sh");
+      expect(response.body.serverDomain).to.equal(TEST_SERVER_DOMAIN);
     });
 
     it("should return 404 for unknown domain", async () => {
@@ -332,7 +333,7 @@ describe("IP Registration API", () => {
         .expect(200);
 
       expect(response.body.domainName).to.equal(testUserId);
-      expect(response.body.serverDomain).to.equal("nsl.sh");
+      expect(response.body.serverDomain).to.equal(TEST_SERVER_DOMAIN);
       expect(response.body.publicKey).to.equal(testKeys.publicKey);
     });
 
@@ -355,7 +356,7 @@ describe("IP Registration API", () => {
         .expect(200);
 
       expect(response.body.domainName).to.equal(testUserId);
-      expect(response.body.serverDomain).to.equal("nsl.sh");
+      expect(response.body.serverDomain).to.equal(TEST_SERVER_DOMAIN);
     });
 
     it("should return valid: false for invalid signature", async () => {

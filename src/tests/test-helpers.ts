@@ -4,6 +4,9 @@ import { NSL_ROUTER_COLLECTION, NSLRouterData } from "../DataBaseDTO/DataBaseNSL
 
 // Test user prefix to identify test data (alphanumeric only for domain validation)
 export const TEST_USER_PREFIX = "testuser";
+// Test server domain - must match SERVER_DOMAIN env var set in test-app.ts
+// The API returns SERVER_DOMAIN from env, not from database (DB value is informational only)
+export const TEST_SERVER_DOMAIN = "test.example.com";
 
 /**
  * Generate a unique test user ID (alphanumeric only to pass domain validation)
@@ -23,7 +26,7 @@ export async function createTestUser(userId: string): Promise<{ publicKey: strin
 
   const userData: NSLRouterData = {
     domainName: userId, // userId is now alphanumeric and valid as domain
-    serverDomain: "nsl.sh",
+    serverDomain: TEST_SERVER_DOMAIN,
     publicKey: keyPair.pub,
   };
 

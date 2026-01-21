@@ -3,6 +3,9 @@ import express from "express";
 import { initializeFb } from "../firebase/firebaseIntegration.js";
 import { routerAPI } from "../services/RouterAPI.js";
 
+// Set test environment variables
+process.env.SERVER_DOMAIN = process.env.SERVER_DOMAIN || "test.example.com";
+
 let initialized = false;
 
 /**

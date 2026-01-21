@@ -1,5 +1,6 @@
 import {NSL_ROUTER_COLLECTION, NSLRouterData} from "../DataBaseDTO/DataBaseNSLRouter.js";
 import admin from "firebase-admin";
+import {getServerDomain} from "../configuration/config.js";
 
 //https://www.nic.ad.jp/timeline/en/20th/appendix1.html#:~:text=Format%20of%20a%20domain%20name,a%20maximum%20of%20253%20characters.
 
@@ -275,7 +276,7 @@ export async function resolveDomainToIp(domainName: string): Promise<{ vpnIp: st
   return {
     vpnIp: domainData.domain.vpnIp,
     domainName: domainData.domain.domainName,
-    serverDomain: domainData.domain.serverDomain
+    serverDomain: getServerDomain()
   };
 }
 

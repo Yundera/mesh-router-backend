@@ -2,14 +2,18 @@ import express from "express";
 import {verifySignature} from "../library/KeyLib.js";
 import {authenticate, AuthUserRequest} from "./ExpressAuthenticateMiddleWare.js";
 import {checkDomainAvailability, deleteUserDomain, getUserDomain, updateUserDomain, registerVpnIp, resolveDomainToIp, updateHeartbeat} from "./Domain.js";
+import {getServerDomain} from "../configuration/config.js";
 
 /*
 full domain = domainName+"."+serverDomain
 model
 nsl-router/%uid%
 - domainName:string // eg foo
-- serverDomain:string //always nsl.sh
+- serverDomain:string // informational only - API returns SERVER_DOMAIN env var
 - publicKey:string
+
+Note: serverDomain is returned from SERVER_DOMAIN environment variable, not from database.
+The database field is kept for informational/audit purposes only.
 */
 
 export function routerAPI(expressApp: express.Application) {
@@ -49,7 +53,7 @@ export function routerAPI(expressApp: express.Application) {
 
         if (isValid) {
           res.json({
-            serverDomain: userData.serverDomain,
+            serverDomain: getServerDomain(),
             domainName: userData.domainName
           });
         } else {
@@ -77,7 +81,7 @@ export function routerAPI(expressApp: express.Application) {
 
       return res.status(200).json({
         domainName: userData.domainName,
-        serverDomain: userData.serverDomain,
+        serverDomain: getServerDomain(),
         publicKey: userData.publicKey
       });
     } catch (error) {
@@ -101,7 +105,7 @@ export function routerAPI(expressApp: express.Application) {
 
       await updateUserDomain(req.user.uid, {
         domainName,
-        serverDomain: serverDomain || "nsl.sh",
+        serverDomain,
         publicKey
       });
       return res.status(200).json({ message: "Domain information updated successfully." });
@@ -161,7 +165,7 @@ export function routerAPI(expressApp: express.Application) {
       return res.status(200).json({
         message: "VPN IP registered successfully.",
         vpnIp,
-        domain: `${userData.domainName}.${userData.serverDomain}`
+        domain: `${userData.domainName}.${getServerDomain()}`
       });
     } catch (error) {
       console.error("Error in POST /ip/:userid/:sig", error);

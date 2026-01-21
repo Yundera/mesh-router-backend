@@ -30,17 +30,17 @@ curl http://localhost:8192/available/myname
 
 # Resolve domain to VPN IP (like DNS)
 curl http://localhost:8192/resolve/myname
-# Response: {"vpnIp":"10.77.0.5","domainName":"myname","serverDomain":"nsl.sh"}
+# Response: {"vpnIp":"10.77.0.5","domainName":"myname","serverDomain":"<SERVER_DOMAIN>"}
 
 # Register VPN IP (requires Ed25519 signature of userid)
 curl -X POST http://localhost:8192/ip/{userid}/{signature} \
   -H "Content-Type: application/json" \
   -d '{"vpnIp": "10.77.0.5"}'
-# Response: {"message":"VPN IP registered successfully.","vpnIp":"10.77.0.5","domain":"myname.nsl.sh"}
+# Response: {"message":"VPN IP registered successfully.","vpnIp":"10.77.0.5","domain":"myname.<SERVER_DOMAIN>"}
 
 # Verify domain ownership
 curl http://localhost:8192/verify/{userid}/{signature}
-# Response: {"serverDomain":"nsl.sh","domainName":"myname"}
+# Response: {"serverDomain":"<SERVER_DOMAIN>","domainName":"myname"}
 ```
 
 ## Getting Started
@@ -52,6 +52,13 @@ pnpm install
 ```
 
 ### Configuration
+
+**Environment Variables**:
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `SERVER_DOMAIN` | Yes | The server domain suffix for all user domains (e.g., `nsl.sh`, `inojob.com`) |
+| `GOOGLE_APPLICATION_CREDENTIALS` | Yes | Path to Firebase service account JSON |
+| `SERVICE_API_KEY` | No | API key for service-to-service authentication |
 
 **Service Account** (required):
 - Path: `./config/serviceAccount.json`
