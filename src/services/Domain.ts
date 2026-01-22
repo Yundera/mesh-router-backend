@@ -226,55 +226,58 @@ function isValidIpAddress(ip: string): boolean {
 }
 
 /**
- * Registers or updates the VPN IP for a user.
+ * Registers or updates the host IP and target port for a user.
  * User must already have a domain registered.
  * @param userId - The user ID
- * @param vpnIp - The VPN IP address to register
+ * @param hostIp - The host IP address to register
+ * @param targetPort - The port where Caddy listens (default: 443)
  */
-export async function registerVpnIp(userId: string, vpnIp: string): Promise<void> {
+export async function registerHostIp(userId: string, hostIp: string, targetPort: number = 443): Promise<void> {
   if (!userId) {
     throw new Error("User ID is required.");
   }
 
-  if (!vpnIp) {
-    throw new Error("VPN IP is required.");
+  if (!hostIp) {
+    throw new Error("Host IP is required.");
   }
 
-  if (!isValidIpAddress(vpnIp)) {
+  if (!isValidIpAddress(hostIp)) {
     throw new Error("Invalid IP address format.");
   }
 
   // Check that user has a domain registered
   const userData = await getUserDomain(userId);
   if (!userData) {
-    throw new Error("User must have a domain registered before setting VPN IP.");
+    throw new Error("User must have a domain registered before setting host IP.");
   }
 
   const userDocRef = admin.firestore().collection(NSL_ROUTER_COLLECTION).doc(userId);
   await userDocRef.update({
-    vpnIp: vpnIp,
-    vpnIpUpdatedAt: new Date().toISOString()
+    hostIp: hostIp,
+    hostIpUpdatedAt: new Date().toISOString(),
+    targetPort: targetPort
   });
 }
 
 /**
- * Resolves a domain name to its VPN IP address.
+ * Resolves a domain name to its host IP address and target port.
  * @param domainName - The subdomain part (e.g., "alice" for alice.nsl.sh)
- * @returns The VPN IP if found, null otherwise
+ * @returns The host IP, target port, and domain info if found, null otherwise
  */
-export async function resolveDomainToIp(domainName: string): Promise<{ vpnIp: string; domainName: string; serverDomain: string } | null> {
+export async function resolveDomainToIp(domainName: string): Promise<{ hostIp: string; targetPort: number; domainName: string; serverDomain: string } | null> {
   if (!domainName) {
     throw new Error("Domain name is required.");
   }
 
   const domainData = await getDomain(domainName);
 
-  if (!domainData || !domainData.domain.vpnIp) {
+  if (!domainData || !domainData.domain.hostIp) {
     return null;
   }
 
   return {
-    vpnIp: domainData.domain.vpnIp,
+    hostIp: domainData.domain.hostIp,
+    targetPort: domainData.domain.targetPort ?? 443,
     domainName: domainData.domain.domainName,
     serverDomain: getServerDomain()
   };

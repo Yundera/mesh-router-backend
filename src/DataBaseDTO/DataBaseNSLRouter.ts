@@ -4,9 +4,12 @@ export interface NSLRouterData {
     domainName: string;
     publicKey: string;
 
-    // VPN IP assigned to this user's PCS instance
-    vpnIp?: string;
-    vpnIpUpdatedAt?: string;
+    // Host IP assigned to this user's PCS instance
+    hostIp?: string;
+    hostIpUpdatedAt?: string;
+
+    // Target port where Caddy listens for incoming traffic (default: 443)
+    targetPort?: number;
 
     // Heartbeat / online status
     lastSeenOnline?: string;

@@ -1,7 +1,7 @@
 import express from "express";
 import {verifySignature} from "../library/KeyLib.js";
 import {authenticate, AuthUserRequest} from "./ExpressAuthenticateMiddleWare.js";
-import {checkDomainAvailability, deleteUserDomain, getUserDomain, updateUserDomain, registerVpnIp, resolveDomainToIp, updateHeartbeat} from "./Domain.js";
+import {checkDomainAvailability, deleteUserDomain, getUserDomain, updateUserDomain, registerHostIp, resolveDomainToIp, updateHeartbeat} from "./Domain.js";
 import {getServerDomain} from "../configuration/config.js";
 
 /*
@@ -127,17 +127,17 @@ export function routerAPI(expressApp: express.Application) {
 
   /**
    * POST /ip/:userid/:sig
-   * Registers the VPN IP for a user, authenticated via signature.
-   * Body: { vpnIp: string }
+   * Registers the host IP and optional target port for a user, authenticated via signature.
+   * Body: { hostIp: string, targetPort?: number }
    * The signature must be a valid Ed25519 signature of the userid using the user's registered public key.
    */
   router.post('/ip/:userid/:sig', async (req, res) => {
     const { userid, sig } = req.params;
-    const { vpnIp } = req.body;
+    const { hostIp, targetPort } = req.body;
 
     try {
-      if (!vpnIp) {
-        return res.status(400).json({ error: "vpnIp is required in request body." });
+      if (!hostIp) {
+        return res.status(400).json({ error: "hostIp is required in request body." });
       }
 
       const userData = await getUserDomain(userid);
@@ -155,16 +155,18 @@ export function routerAPI(expressApp: express.Application) {
         console.log('Invalid signature format', { userid, error: e.message });
         return res.status(401).json({ error: "Invalid signature." });
       }
-      console.log('Verifying signature for IP registration', { userid, vpnIp, isValid });
+      const resolvedTargetPort = targetPort ?? 443;
+      console.log('Verifying signature for IP registration', { userid, hostIp, targetPort: resolvedTargetPort, isValid });
 
       if (!isValid) {
         return res.status(401).json({ error: "Invalid signature." });
       }
 
-      await registerVpnIp(userid, vpnIp);
+      await registerHostIp(userid, hostIp, resolvedTargetPort);
       return res.status(200).json({
-        message: "VPN IP registered successfully.",
-        vpnIp,
+        message: "Host IP registered successfully.",
+        hostIp,
+        targetPort: resolvedTargetPort,
         domain: `${userData.domainName}.${getServerDomain()}`
       });
     } catch (error) {
@@ -175,7 +177,7 @@ export function routerAPI(expressApp: express.Application) {
 
   /**
    * GET /resolve/:domain
-   * Public endpoint - resolves a domain name to its VPN IP (like DNS).
+   * Public endpoint - resolves a domain name to its host IP (like DNS).
    * :domain is the subdomain part (e.g., "alice" for alice.nsl.sh)
    */
   router.get('/resolve/:domain', async (req, res) => {

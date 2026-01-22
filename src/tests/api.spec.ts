@@ -45,37 +45,59 @@ describe("IP Registration API", () => {
   });
 
   describe("POST /ip/:userid/:sig", () => {
-    it("should register VPN IP with valid signature", async () => {
-      const vpnIp = "10.77.0.100";
+    it("should register Host IP with valid signature", async () => {
+      const hostIp = "10.77.0.100";
       const signature = await signMessage(testKeys.privateKey, testUserId);
 
       const response = await request(app)
         .post(`/ip/${testUserId}/${signature}`)
-        .send({ vpnIp })
+        .send({ hostIp })
         .expect(200);
 
-      expect(response.body.message).to.equal("VPN IP registered successfully.");
-      expect(response.body.vpnIp).to.equal(vpnIp);
+      expect(response.body.message).to.equal("Host IP registered successfully.");
+      expect(response.body.hostIp).to.equal(hostIp);
+      expect(response.body.targetPort).to.equal(443); // Default port
 
       // Verify in database
       const userData = await getTestUserData(testUserId);
-      expect(userData?.vpnIp).to.equal(vpnIp);
-      expect(userData?.vpnIpUpdatedAt).to.be.a("string");
+      expect(userData?.hostIp).to.equal(hostIp);
+      expect(userData?.hostIpUpdatedAt).to.be.a("string");
+      expect(userData?.targetPort).to.equal(443);
+    });
+
+    it("should register Host IP with custom targetPort", async () => {
+      const hostIp = "10.77.0.100";
+      const targetPort = 8443;
+      const signature = await signMessage(testKeys.privateKey, testUserId);
+
+      const response = await request(app)
+        .post(`/ip/${testUserId}/${signature}`)
+        .send({ hostIp, targetPort })
+        .expect(200);
+
+      expect(response.body.message).to.equal("Host IP registered successfully.");
+      expect(response.body.hostIp).to.equal(hostIp);
+      expect(response.body.targetPort).to.equal(targetPort);
+
+      // Verify in database
+      const userData = await getTestUserData(testUserId);
+      expect(userData?.hostIp).to.equal(hostIp);
+      expect(userData?.targetPort).to.equal(targetPort);
     });
 
     it("should reject invalid signature", async () => {
-      const vpnIp = "10.77.0.100";
+      const hostIp = "10.77.0.100";
       const invalidSignature = "k1234567890invalidSignature";
 
       const response = await request(app)
         .post(`/ip/${testUserId}/${invalidSignature}`)
-        .send({ vpnIp })
+        .send({ hostIp })
         .expect(401);
 
       expect(response.body.error).to.equal("Invalid signature.");
     });
 
-    it("should reject missing vpnIp in body", async () => {
+    it("should reject missing hostIp in body", async () => {
       const signature = await signMessage(testKeys.privateKey, testUserId);
 
       const response = await request(app)
@@ -83,7 +105,7 @@ describe("IP Registration API", () => {
         .send({})
         .expect(400);
 
-      expect(response.body.error).to.equal("vpnIp is required in request body.");
+      expect(response.body.error).to.equal("hostIp is required in request body.");
     });
 
     it("should reject invalid IP format", async () => {
@@ -92,7 +114,7 @@ describe("IP Registration API", () => {
 
       const response = await request(app)
         .post(`/ip/${testUserId}/${signature}`)
-        .send({ vpnIp: invalidIp })
+        .send({ hostIp: invalidIp })
         .expect(500); // Domain.ts throws error which results in 500
 
       expect(response.body.error).to.include("Invalid IP address format");
@@ -104,58 +126,58 @@ describe("IP Registration API", () => {
 
       const response = await request(app)
         .post(`/ip/${fakeUserId}/${signature}`)
-        .send({ vpnIp: "10.77.0.100" })
+        .send({ hostIp: "10.77.0.100" })
         .expect(404);
 
       expect(response.body.error).to.equal("User not found. Register a domain first.");
     });
 
     it("should accept valid full IPv6 address", async () => {
-      const vpnIpv6 = "2001:0db8:85a3:0000:0000:8a2e:0370:7334";
+      const hostIpv6 = "2001:0db8:85a3:0000:0000:8a2e:0370:7334";
       const signature = await signMessage(testKeys.privateKey, testUserId);
 
       const response = await request(app)
         .post(`/ip/${testUserId}/${signature}`)
-        .send({ vpnIp: vpnIpv6 })
+        .send({ hostIp: hostIpv6 })
         .expect(200);
 
-      expect(response.body.vpnIp).to.equal(vpnIpv6);
+      expect(response.body.hostIp).to.equal(hostIpv6);
     });
 
     it("should accept compressed IPv6 address (::1)", async () => {
-      const vpnIpv6 = "::1";
+      const hostIpv6 = "::1";
       const signature = await signMessage(testKeys.privateKey, testUserId);
 
       const response = await request(app)
         .post(`/ip/${testUserId}/${signature}`)
-        .send({ vpnIp: vpnIpv6 })
+        .send({ hostIp: hostIpv6 })
         .expect(200);
 
-      expect(response.body.vpnIp).to.equal(vpnIpv6);
+      expect(response.body.hostIp).to.equal(hostIpv6);
     });
 
     it("should accept compressed IPv6 address (fe80::1)", async () => {
-      const vpnIpv6 = "fe80::1";
+      const hostIpv6 = "fe80::1";
       const signature = await signMessage(testKeys.privateKey, testUserId);
 
       const response = await request(app)
         .post(`/ip/${testUserId}/${signature}`)
-        .send({ vpnIp: vpnIpv6 })
+        .send({ hostIp: hostIpv6 })
         .expect(200);
 
-      expect(response.body.vpnIp).to.equal(vpnIpv6);
+      expect(response.body.hostIp).to.equal(hostIpv6);
     });
 
     it("should accept compressed IPv6 address (2001:db8::)", async () => {
-      const vpnIpv6 = "2001:db8::";
+      const hostIpv6 = "2001:db8::";
       const signature = await signMessage(testKeys.privateKey, testUserId);
 
       const response = await request(app)
         .post(`/ip/${testUserId}/${signature}`)
-        .send({ vpnIp: vpnIpv6 })
+        .send({ hostIp: hostIpv6 })
         .expect(200);
 
-      expect(response.body.vpnIp).to.equal(vpnIpv6);
+      expect(response.body.hostIp).to.equal(hostIpv6);
     });
 
     it("should reject invalid IPv6 with multiple ::", async () => {
@@ -164,7 +186,7 @@ describe("IP Registration API", () => {
 
       const response = await request(app)
         .post(`/ip/${testUserId}/${signature}`)
-        .send({ vpnIp: invalidIpv6 })
+        .send({ hostIp: invalidIpv6 })
         .expect(500);
 
       expect(response.body.error).to.include("Invalid IP address format");
@@ -178,24 +200,24 @@ describe("IP Registration API", () => {
       // Register first IP
       await request(app)
         .post(`/ip/${testUserId}/${signature}`)
-        .send({ vpnIp: firstIp })
+        .send({ hostIp: firstIp })
         .expect(200);
 
       // Update with second IP
       await request(app)
         .post(`/ip/${testUserId}/${signature}`)
-        .send({ vpnIp: secondIp })
+        .send({ hostIp: secondIp })
         .expect(200);
 
       // Verify updated
       const userData = await getTestUserData(testUserId);
-      expect(userData?.vpnIp).to.equal(secondIp);
+      expect(userData?.hostIp).to.equal(secondIp);
     });
   });
 
   describe("GET /resolve/:domain", () => {
-    it("should resolve domain to IP", async () => {
-      const vpnIp = "10.77.0.150";
+    it("should resolve domain to IP with default targetPort", async () => {
+      const hostIp = "10.77.0.150";
       const signature = await signMessage(testKeys.privateKey, testUserId);
       // domainName is the same as testUserId (alphanumeric)
       const domainName = testUserId;
@@ -203,7 +225,7 @@ describe("IP Registration API", () => {
       // First register the IP
       await request(app)
         .post(`/ip/${testUserId}/${signature}`)
-        .send({ vpnIp })
+        .send({ hostIp })
         .expect(200);
 
       // Then resolve it
@@ -211,9 +233,32 @@ describe("IP Registration API", () => {
         .get(`/resolve/${domainName}`)
         .expect(200);
 
-      expect(response.body.vpnIp).to.equal(vpnIp);
+      expect(response.body.hostIp).to.equal(hostIp);
+      expect(response.body.targetPort).to.equal(443);
       expect(response.body.domainName).to.equal(domainName);
       expect(response.body.serverDomain).to.equal(TEST_SERVER_DOMAIN);
+    });
+
+    it("should resolve domain to IP with custom targetPort", async () => {
+      const hostIp = "10.77.0.151";
+      const targetPort = 8443;
+      const signature = await signMessage(testKeys.privateKey, testUserId);
+      const domainName = testUserId;
+
+      // First register the IP with custom port
+      await request(app)
+        .post(`/ip/${testUserId}/${signature}`)
+        .send({ hostIp, targetPort })
+        .expect(200);
+
+      // Then resolve it
+      const response = await request(app)
+        .get(`/resolve/${domainName}`)
+        .expect(200);
+
+      expect(response.body.hostIp).to.equal(hostIp);
+      expect(response.body.targetPort).to.equal(targetPort);
+      expect(response.body.domainName).to.equal(domainName);
     });
 
     it("should return 404 for unknown domain", async () => {
@@ -237,7 +282,7 @@ describe("IP Registration API", () => {
     });
 
     it("should handle case-insensitive domain lookup", async () => {
-      const vpnIp = "10.77.0.160";
+      const hostIp = "10.77.0.160";
       const signature = await signMessage(testKeys.privateKey, testUserId);
       // domainName is the same as testUserId
       const domainName = testUserId;
@@ -245,7 +290,7 @@ describe("IP Registration API", () => {
       // Register IP
       await request(app)
         .post(`/ip/${testUserId}/${signature}`)
-        .send({ vpnIp })
+        .send({ hostIp })
         .expect(200);
 
       // Resolve with uppercase (should be normalized to lowercase)
@@ -253,7 +298,7 @@ describe("IP Registration API", () => {
         .get(`/resolve/${domainName.toUpperCase()}`)
         .expect(200);
 
-      expect(response.body.vpnIp).to.equal(vpnIp);
+      expect(response.body.hostIp).to.equal(hostIp);
     });
   });
 

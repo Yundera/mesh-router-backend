@@ -67,9 +67,9 @@ docker compose exec mesh-router-backend pnpm test
 ```
 IP Registration API
   POST /ip/:userid/:sig
-    ✔ should register VPN IP with valid signature
+    ✔ should register Host IP with valid signature
     ✔ should reject invalid signature
-    ✔ should reject missing vpnIp in body
+    ✔ should reject missing hostIp in body
     ✔ should reject invalid IP format
     ✔ should reject non-existent user
     ✔ should accept valid IPv6 address
@@ -182,8 +182,8 @@ pnpm lint
 
 | Method | Endpoint | Auth | Description |
 |--------|----------|------|-------------|
-| POST | `/ip/:userid/:sig` | Ed25519 Signature | Register VPN IP for user |
-| GET | `/resolve/:domain` | Public | Resolve domain to VPN IP |
+| POST | `/ip/:userid/:sig` | Ed25519 Signature | Register Host IP for user |
+| GET | `/resolve/:domain` | Public | Resolve domain to Host IP |
 
 ### Example Usage
 
@@ -193,13 +193,13 @@ curl http://localhost:8192/available/myname
 
 # Resolve domain to IP (like DNS)
 curl http://localhost:8192/resolve/myname
-# Response: {"vpnIp":"10.77.0.5","domainName":"myname","serverDomain":"<SERVER_DOMAIN>"}
+# Response: {"hostIp":"10.77.0.5","domainName":"myname","serverDomain":"<SERVER_DOMAIN>"}
 
 # Register IP (requires signature)
 curl -X POST http://localhost:8192/ip/{userid}/{signature} \
   -H "Content-Type: application/json" \
-  -d '{"vpnIp": "10.77.0.5"}'
-# Response: {"message":"VPN IP registered successfully.","vpnIp":"10.77.0.5","domain":"myname.<SERVER_DOMAIN>"}
+  -d '{"hostIp": "10.77.0.5"}'
+# Response: {"message":"Host IP registered successfully.","hostIp":"10.77.0.5","domain":"myname.<SERVER_DOMAIN>"}
 ```
 
 > **Note:** `serverDomain` in responses comes from the `SERVER_DOMAIN` environment variable.
