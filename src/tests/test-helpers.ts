@@ -1,6 +1,8 @@
 import { generateKeyPair, sign } from "../library/KeyLib.js";
 import admin from "firebase-admin";
 import { NSL_ROUTER_COLLECTION, NSLRouterData } from "../DataBaseDTO/DataBaseNSLRouter.js";
+import { getRedisClient } from "../redis/redisClient.js";
+import { deleteRoutes, getRoutes, Route } from "../services/Routes.js";
 
 // Test user prefix to identify test data (alphanumeric only for domain validation)
 export const TEST_USER_PREFIX = "testuser";
@@ -83,4 +85,35 @@ export async function cleanupAllTestUsers(): Promise<void> {
 export async function getTestUserData(userId: string): Promise<NSLRouterData | null> {
   const doc = await admin.firestore().collection(NSL_ROUTER_COLLECTION).doc(userId).get();
   return doc.exists ? (doc.data() as NSLRouterData) : null;
+}
+
+/**
+ * Get routes from Redis for a test user
+ */
+export async function getTestUserRoutes(userId: string): Promise<Route[] | null> {
+  return getRoutes(userId);
+}
+
+/**
+ * Delete routes from Redis for a test user
+ */
+export async function deleteTestUserRoutes(userId: string): Promise<void> {
+  try {
+    await deleteRoutes(userId);
+  } catch {
+    // Ignore if routes don't exist
+  }
+}
+
+/**
+ * Clean up all test routes from Redis (those with TEST_USER_PREFIX)
+ */
+export async function cleanupAllTestRoutes(): Promise<void> {
+  const redis = getRedisClient();
+  const keys = await redis.keys(`routes:${TEST_USER_PREFIX}*`);
+
+  if (keys.length > 0) {
+    await redis.del(...keys);
+    console.log(`[Test Cleanup] Deleted ${keys.length} test route entries from Redis`);
+  }
 }

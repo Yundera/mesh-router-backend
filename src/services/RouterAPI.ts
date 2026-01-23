@@ -1,8 +1,9 @@
 import express from "express";
 import {verifySignature} from "../library/KeyLib.js";
 import {authenticate, AuthUserRequest} from "./ExpressAuthenticateMiddleWare.js";
-import {checkDomainAvailability, deleteUserDomain, getUserDomain, updateUserDomain, registerHostIp, resolveDomainToIp, updateHeartbeat} from "./Domain.js";
+import {checkDomainAvailability, deleteUserDomain, getUserDomain, updateUserDomain, registerHostIp, resolveDomainToIp, updateHeartbeat, checkOnlineStatus, getDomain} from "./Domain.js";
 import {getServerDomain} from "../configuration/config.js";
+import {registerRoutes, getRoutes, deleteRoutes, Route} from "./Routes.js";
 
 /*
 full domain = domainName+"."+serverDomain
@@ -233,6 +234,213 @@ export function routerAPI(expressApp: express.Application) {
       });
     } catch (error) {
       console.error("Error in POST /heartbeat/:userid/:sig", error);
+      return res.status(500).json({ error: error.toString() });
+    }
+  });
+
+  /**
+   * GET /status/:userid
+   * Checks if a user is online based on their lastSeenOnline timestamp.
+   * Returns online status and the lastSeenOnline timestamp.
+   */
+  router.get('/status/:userid', async (req, res) => {
+    const { userid } = req.params;
+
+    try {
+      const status = await checkOnlineStatus(userid);
+
+      return res.status(200).json(status);
+    } catch (error) {
+      if (error.message === "User not found.") {
+        return res.status(404).json({ error: error.message });
+      }
+      console.error("Error in GET /status/:userid", error);
+      return res.status(500).json({ error: error.toString() });
+    }
+  });
+
+  // ============================================================================
+  // Routes v2 API - Multi-route support with Redis storage
+  // ============================================================================
+
+  /**
+   * POST /routes/:userid/:sig
+   * Register or update routes for a user.
+   * Routes are stored in Redis with a TTL (refreshed on each call).
+   *
+   * Body: { routes: [{ ip, port, priority, healthCheck? }] }
+   *   - ip: string - IP address of the route endpoint
+   *   - port: number - Port number (1-65535)
+   *   - priority: number - Lower = higher priority (1 = direct, 2 = tunnel)
+   *   - healthCheck: { path: string, host?: string } - Optional health check config
+   *
+   * The signature must be a valid Ed25519 signature of the userid.
+   */
+  router.post('/routes/:userid/:sig', async (req, res) => {
+    const { userid, sig } = req.params;
+    const { routes } = req.body;
+
+    try {
+      if (!routes || !Array.isArray(routes) || routes.length === 0) {
+        return res.status(400).json({ error: "routes array is required in request body." });
+      }
+
+      const userData = await getUserDomain(userid);
+
+      if (!userData) {
+        return res.status(404).json({ error: "User not found. Register a domain first." });
+      }
+
+      // Verify signature using stored public key
+      let isValid = false;
+      try {
+        isValid = await verifySignature(userData.publicKey, sig, userid);
+      } catch (e) {
+        console.log('Invalid signature format for routes registration', { userid, error: e.message });
+        return res.status(401).json({ error: "Invalid signature." });
+      }
+
+      if (!isValid) {
+        return res.status(401).json({ error: "Invalid signature." });
+      }
+
+      // Validate and normalize routes
+      const validatedRoutes: Route[] = routes.map((r: any, index: number) => {
+        if (!r.ip) {
+          throw new Error(`Route ${index}: ip is required.`);
+        }
+        if (!r.port || r.port < 1 || r.port > 65535) {
+          throw new Error(`Route ${index}: port must be between 1 and 65535.`);
+        }
+        if (typeof r.priority !== 'number') {
+          throw new Error(`Route ${index}: priority is required.`);
+        }
+
+        const route: Route = {
+          ip: r.ip,
+          port: r.port,
+          priority: r.priority,
+        };
+
+        // Add health check if provided
+        if (r.healthCheck && r.healthCheck.path) {
+          route.healthCheck = {
+            path: r.healthCheck.path,
+            ...(r.healthCheck.host && { host: r.healthCheck.host }),
+          };
+        }
+
+        return route;
+      });
+
+      await registerRoutes(userid, validatedRoutes);
+
+      console.log('Routes registered', { userid, routeCount: validatedRoutes.length });
+
+      return res.status(200).json({
+        message: "Routes registered successfully.",
+        routes: validatedRoutes,
+        domain: `${userData.domainName}.${getServerDomain()}`
+      });
+    } catch (error) {
+      console.error("Error in POST /routes/:userid/:sig", error);
+      return res.status(500).json({ error: error.toString() });
+    }
+  });
+
+  /**
+   * DELETE /routes/:userid/:sig
+   * Delete all routes for a user.
+   *
+   * The signature must be a valid Ed25519 signature of the userid.
+   */
+  router.delete('/routes/:userid/:sig', async (req, res) => {
+    const { userid, sig } = req.params;
+
+    try {
+      const userData = await getUserDomain(userid);
+
+      if (!userData) {
+        return res.status(404).json({ error: "User not found." });
+      }
+
+      // Verify signature using stored public key
+      let isValid = false;
+      try {
+        isValid = await verifySignature(userData.publicKey, sig, userid);
+      } catch (e) {
+        console.log('Invalid signature format for routes deletion', { userid, error: e.message });
+        return res.status(401).json({ error: "Invalid signature." });
+      }
+
+      if (!isValid) {
+        return res.status(401).json({ error: "Invalid signature." });
+      }
+
+      await deleteRoutes(userid);
+
+      console.log('Routes deleted', { userid });
+
+      return res.status(200).json({
+        message: "Routes deleted successfully."
+      });
+    } catch (error) {
+      console.error("Error in DELETE /routes/:userid/:sig", error);
+      return res.status(500).json({ error: error.toString() });
+    }
+  });
+
+  /**
+   * GET /routes/:userid
+   * Get the current routes for a user (public, no auth required).
+   * Useful for debugging and monitoring.
+   */
+  router.get('/routes/:userid', async (req, res) => {
+    const { userid } = req.params;
+
+    try {
+      const routes = await getRoutes(userid);
+
+      if (!routes) {
+        return res.status(404).json({ error: "No routes registered for this user." });
+      }
+
+      return res.status(200).json({ routes });
+    } catch (error) {
+      console.error("Error in GET /routes/:userid", error);
+      return res.status(500).json({ error: error.toString() });
+    }
+  });
+
+  /**
+   * GET /resolve/v2/:domain
+   * Resolve a domain to its routes (v2 API using Redis).
+   * Returns identity info from Firestore + routes from Redis.
+   *
+   * :domain is the subdomain part (e.g., "alice" for alice.nsl.sh)
+   */
+  router.get('/resolve/v2/:domain', async (req, res) => {
+    try {
+      const domain = req.params.domain.trim().toLowerCase();
+
+      // Get identity from Firestore
+      const domainData = await getDomain(domain);
+
+      if (!domainData) {
+        return res.status(404).json({ error: "Domain not found." });
+      }
+
+      // Get routes from Redis
+      const routes = await getRoutes(domainData.uid);
+
+      return res.status(200).json({
+        userId: domainData.uid,
+        domainName: domainData.domain.domainName,
+        serverDomain: getServerDomain(),
+        routes: routes || [],  // Empty array if no routes registered
+      });
+    } catch (error) {
+      console.error("Error in GET /resolve/v2/:domain", error);
       return res.status(500).json({ error: error.toString() });
     }
   });

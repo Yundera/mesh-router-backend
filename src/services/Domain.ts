@@ -304,3 +304,44 @@ export async function updateHeartbeat(userId: string): Promise<string> {
 
   return lastSeenOnline;
 }
+
+/**
+ * Default threshold in seconds to consider a user offline.
+ * If no heartbeat received within this time, user is considered offline.
+ */
+const DEFAULT_OFFLINE_THRESHOLD_SECONDS = 120; // 2 minutes
+
+/**
+ * Checks if a user is currently online based on their lastSeenOnline timestamp.
+ * @param userId - The user ID
+ * @param thresholdSeconds - Optional threshold in seconds (default: 120 seconds / 2 minutes)
+ * @returns Online status with lastSeenOnline timestamp
+ */
+export async function checkOnlineStatus(
+  userId: string,
+  thresholdSeconds: number = DEFAULT_OFFLINE_THRESHOLD_SECONDS
+): Promise<{ online: boolean; lastSeenOnline: string | null }> {
+  if (!userId) {
+    throw new Error("User ID is required.");
+  }
+
+  const userData = await getUserDomain(userId);
+  if (!userData) {
+    throw new Error("User not found.");
+  }
+
+  const lastSeenOnline = userData.lastSeenOnline ?? null;
+
+  if (!lastSeenOnline) {
+    return { online: false, lastSeenOnline: null };
+  }
+
+  const lastSeenDate = new Date(lastSeenOnline);
+  const now = new Date();
+  const diffSeconds = (now.getTime() - lastSeenDate.getTime()) / 1000;
+
+  return {
+    online: diffSeconds <= thresholdSeconds,
+    lastSeenOnline
+  };
+}

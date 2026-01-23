@@ -9,6 +9,9 @@ import {
   signMessage,
   getTestUserData,
   cleanupAllTestUsers,
+  cleanupAllTestRoutes,
+  getTestUserRoutes,
+  deleteTestUserRoutes,
   TEST_SERVER_DOMAIN,
 } from "./test-helpers.js";
 import type { Application } from "express";
@@ -422,6 +425,363 @@ describe("IP Registration API", () => {
         .expect(200);
 
       expect(response.body.error).to.equal("unknown user");
+    });
+  });
+});
+
+// ============================================================================
+// Routes v2 API Tests
+// ============================================================================
+
+describe("Routes v2 API", () => {
+  let app: Application;
+  let testUserId: string;
+  let testKeys: { publicKey: string; privateKey: string };
+
+  before(async () => {
+    app = createTestApp();
+    await cleanupAllTestUsers();
+    await cleanupAllTestRoutes();
+  });
+
+  after(async () => {
+    await cleanupAllTestUsers();
+    await cleanupAllTestRoutes();
+  });
+
+  beforeEach(async () => {
+    testUserId = generateTestUserId();
+    testKeys = await createTestUser(testUserId);
+  });
+
+  afterEach(async () => {
+    try {
+      await deleteTestUser(testUserId);
+      await deleteTestUserRoutes(testUserId);
+    } catch {
+      // Ignore if already deleted
+    }
+  });
+
+  describe("POST /routes/:userid/:sig", () => {
+    it("should register a single route with valid signature", async () => {
+      const signature = await signMessage(testKeys.privateKey, testUserId);
+      const routes = [
+        { ip: "10.77.0.100", port: 443, priority: 1 }
+      ];
+
+      const response = await request(app)
+        .post(`/routes/${testUserId}/${signature}`)
+        .send({ routes })
+        .expect(200);
+
+      expect(response.body.message).to.equal("Routes registered successfully.");
+      expect(response.body.routes).to.have.lengthOf(1);
+      expect(response.body.routes[0].ip).to.equal("10.77.0.100");
+      expect(response.body.routes[0].port).to.equal(443);
+      expect(response.body.routes[0].priority).to.equal(1);
+
+      // Verify in Redis
+      const storedRoutes = await getTestUserRoutes(testUserId);
+      expect(storedRoutes).to.have.lengthOf(1);
+      expect(storedRoutes![0].ip).to.equal("10.77.0.100");
+    });
+
+    it("should register multiple routes (direct + tunnel)", async () => {
+      const signature = await signMessage(testKeys.privateKey, testUserId);
+      const routes = [
+        { ip: "203.0.113.5", port: 443, priority: 1 },   // Direct
+        { ip: "10.77.0.100", port: 80, priority: 2 }     // Tunnel
+      ];
+
+      const response = await request(app)
+        .post(`/routes/${testUserId}/${signature}`)
+        .send({ routes })
+        .expect(200);
+
+      expect(response.body.routes).to.have.lengthOf(2);
+
+      const storedRoutes = await getTestUserRoutes(testUserId);
+      expect(storedRoutes).to.have.lengthOf(2);
+    });
+
+    it("should register route with health check", async () => {
+      const signature = await signMessage(testKeys.privateKey, testUserId);
+      const routes = [
+        {
+          ip: "10.77.0.100",
+          port: 443,
+          priority: 1,
+          healthCheck: {
+            path: "/.well-known/health",
+            host: "alice.nsl.sh"
+          }
+        }
+      ];
+
+      const response = await request(app)
+        .post(`/routes/${testUserId}/${signature}`)
+        .send({ routes })
+        .expect(200);
+
+      expect(response.body.routes[0].healthCheck).to.deep.equal({
+        path: "/.well-known/health",
+        host: "alice.nsl.sh"
+      });
+
+      const storedRoutes = await getTestUserRoutes(testUserId);
+      expect(storedRoutes![0].healthCheck?.path).to.equal("/.well-known/health");
+      expect(storedRoutes![0].healthCheck?.host).to.equal("alice.nsl.sh");
+    });
+
+    it("should register route with health check path only (no host)", async () => {
+      const signature = await signMessage(testKeys.privateKey, testUserId);
+      const routes = [
+        {
+          ip: "10.77.0.100",
+          port: 443,
+          priority: 1,
+          healthCheck: {
+            path: "/health"
+          }
+        }
+      ];
+
+      const response = await request(app)
+        .post(`/routes/${testUserId}/${signature}`)
+        .send({ routes })
+        .expect(200);
+
+      expect(response.body.routes[0].healthCheck.path).to.equal("/health");
+      expect(response.body.routes[0].healthCheck.host).to.be.undefined;
+    });
+
+    it("should update existing routes (refresh)", async () => {
+      const signature = await signMessage(testKeys.privateKey, testUserId);
+
+      // Register first route
+      await request(app)
+        .post(`/routes/${testUserId}/${signature}`)
+        .send({ routes: [{ ip: "10.77.0.100", port: 443, priority: 1 }] })
+        .expect(200);
+
+      // Update with new route
+      await request(app)
+        .post(`/routes/${testUserId}/${signature}`)
+        .send({ routes: [{ ip: "10.77.0.200", port: 8443, priority: 1 }] })
+        .expect(200);
+
+      const storedRoutes = await getTestUserRoutes(testUserId);
+      expect(storedRoutes).to.have.lengthOf(1);
+      expect(storedRoutes![0].ip).to.equal("10.77.0.200");
+      expect(storedRoutes![0].port).to.equal(8443);
+    });
+
+    it("should reject invalid signature", async () => {
+      const invalidSignature = "k1234567890invalidSignature";
+
+      const response = await request(app)
+        .post(`/routes/${testUserId}/${invalidSignature}`)
+        .send({ routes: [{ ip: "10.77.0.100", port: 443, priority: 1 }] })
+        .expect(401);
+
+      expect(response.body.error).to.equal("Invalid signature.");
+    });
+
+    it("should reject missing routes in body", async () => {
+      const signature = await signMessage(testKeys.privateKey, testUserId);
+
+      const response = await request(app)
+        .post(`/routes/${testUserId}/${signature}`)
+        .send({})
+        .expect(400);
+
+      expect(response.body.error).to.equal("routes array is required in request body.");
+    });
+
+    it("should reject empty routes array", async () => {
+      const signature = await signMessage(testKeys.privateKey, testUserId);
+
+      const response = await request(app)
+        .post(`/routes/${testUserId}/${signature}`)
+        .send({ routes: [] })
+        .expect(400);
+
+      expect(response.body.error).to.equal("routes array is required in request body.");
+    });
+
+    it("should reject route with missing IP", async () => {
+      const signature = await signMessage(testKeys.privateKey, testUserId);
+
+      const response = await request(app)
+        .post(`/routes/${testUserId}/${signature}`)
+        .send({ routes: [{ port: 443, priority: 1 }] })
+        .expect(500);
+
+      expect(response.body.error).to.include("ip is required");
+    });
+
+    it("should reject route with invalid port", async () => {
+      const signature = await signMessage(testKeys.privateKey, testUserId);
+
+      const response = await request(app)
+        .post(`/routes/${testUserId}/${signature}`)
+        .send({ routes: [{ ip: "10.77.0.100", port: 99999, priority: 1 }] })
+        .expect(500);
+
+      expect(response.body.error).to.include("port must be between 1 and 65535");
+    });
+
+    it("should reject non-existent user", async () => {
+      const fakeUserId = "nonexistentuser12345";
+      const signature = await signMessage(testKeys.privateKey, fakeUserId);
+
+      const response = await request(app)
+        .post(`/routes/${fakeUserId}/${signature}`)
+        .send({ routes: [{ ip: "10.77.0.100", port: 443, priority: 1 }] })
+        .expect(404);
+
+      expect(response.body.error).to.equal("User not found. Register a domain first.");
+    });
+  });
+
+  describe("DELETE /routes/:userid/:sig", () => {
+    it("should delete routes with valid signature", async () => {
+      const signature = await signMessage(testKeys.privateKey, testUserId);
+
+      // First register routes
+      await request(app)
+        .post(`/routes/${testUserId}/${signature}`)
+        .send({ routes: [{ ip: "10.77.0.100", port: 443, priority: 1 }] })
+        .expect(200);
+
+      // Then delete them
+      const response = await request(app)
+        .delete(`/routes/${testUserId}/${signature}`)
+        .expect(200);
+
+      expect(response.body.message).to.equal("Routes deleted successfully.");
+
+      // Verify deleted from Redis
+      const storedRoutes = await getTestUserRoutes(testUserId);
+      expect(storedRoutes).to.be.null;
+    });
+
+    it("should reject invalid signature", async () => {
+      const invalidSignature = "k1234567890invalidSignature";
+
+      const response = await request(app)
+        .delete(`/routes/${testUserId}/${invalidSignature}`)
+        .expect(401);
+
+      expect(response.body.error).to.equal("Invalid signature.");
+    });
+
+    it("should succeed even if no routes exist", async () => {
+      const signature = await signMessage(testKeys.privateKey, testUserId);
+
+      const response = await request(app)
+        .delete(`/routes/${testUserId}/${signature}`)
+        .expect(200);
+
+      expect(response.body.message).to.equal("Routes deleted successfully.");
+    });
+  });
+
+  describe("GET /routes/:userid", () => {
+    it("should return routes for user with registered routes", async () => {
+      const signature = await signMessage(testKeys.privateKey, testUserId);
+
+      // Register routes first
+      await request(app)
+        .post(`/routes/${testUserId}/${signature}`)
+        .send({ routes: [
+          { ip: "10.77.0.100", port: 443, priority: 1 },
+          { ip: "10.77.0.200", port: 80, priority: 2 }
+        ]})
+        .expect(200);
+
+      // Get routes
+      const response = await request(app)
+        .get(`/routes/${testUserId}`)
+        .expect(200);
+
+      expect(response.body.routes).to.have.lengthOf(2);
+      expect(response.body.routes[0].ip).to.equal("10.77.0.100");
+      expect(response.body.routes[1].ip).to.equal("10.77.0.200");
+    });
+
+    it("should return 404 for user with no routes", async () => {
+      const response = await request(app)
+        .get(`/routes/${testUserId}`)
+        .expect(404);
+
+      expect(response.body.error).to.equal("No routes registered for this user.");
+    });
+  });
+
+  describe("GET /resolve/v2/:domain", () => {
+    it("should resolve domain to routes", async () => {
+      const signature = await signMessage(testKeys.privateKey, testUserId);
+      const domainName = testUserId; // domainName equals userId in tests
+
+      // Register routes
+      await request(app)
+        .post(`/routes/${testUserId}/${signature}`)
+        .send({ routes: [
+          { ip: "203.0.113.5", port: 443, priority: 1 },
+          { ip: "10.77.0.100", port: 80, priority: 2 }
+        ]})
+        .expect(200);
+
+      // Resolve
+      const response = await request(app)
+        .get(`/resolve/v2/${domainName}`)
+        .expect(200);
+
+      expect(response.body.userId).to.equal(testUserId);
+      expect(response.body.domainName).to.equal(domainName);
+      expect(response.body.serverDomain).to.equal(TEST_SERVER_DOMAIN);
+      expect(response.body.routes).to.have.lengthOf(2);
+      expect(response.body.routes[0].ip).to.equal("203.0.113.5");
+      expect(response.body.routes[1].ip).to.equal("10.77.0.100");
+    });
+
+    it("should return empty routes array for domain without routes", async () => {
+      const domainName = testUserId;
+
+      const response = await request(app)
+        .get(`/resolve/v2/${domainName}`)
+        .expect(200);
+
+      expect(response.body.userId).to.equal(testUserId);
+      expect(response.body.routes).to.be.an("array").that.is.empty;
+    });
+
+    it("should return 404 for unknown domain", async () => {
+      const response = await request(app)
+        .get("/resolve/v2/nonexistentdomain12345")
+        .expect(404);
+
+      expect(response.body.error).to.equal("Domain not found.");
+    });
+
+    it("should handle case-insensitive domain lookup", async () => {
+      const signature = await signMessage(testKeys.privateKey, testUserId);
+      const domainName = testUserId;
+
+      // Register routes
+      await request(app)
+        .post(`/routes/${testUserId}/${signature}`)
+        .send({ routes: [{ ip: "10.77.0.100", port: 443, priority: 1 }]})
+        .expect(200);
+
+      // Resolve with uppercase
+      const response = await request(app)
+        .get(`/resolve/v2/${domainName.toUpperCase()}`)
+        .expect(200);
+
+      expect(response.body.routes).to.have.lengthOf(1);
     });
   });
 });
