@@ -32,11 +32,19 @@ function getRoutesKey(userId: string): string {
 }
 
 /**
+ * Generate a unique key for a route based on ip:port.
+ */
+function getRouteKey(route: Route): string {
+  return `${route.ip}:${route.port}`;
+}
+
+/**
  * Register or update routes for a user.
- * Stores the routes in Redis with a TTL.
+ * Merges new routes with existing routes based on ip:port as unique identifier.
+ * This allows multiple sources (agent, tunnel) to register routes independently.
  *
  * @param userId - The user ID
- * @param routes - Array of routes to register
+ * @param routes - Array of routes to register/update
  */
 export async function registerRoutes(userId: string, routes: Route[]): Promise<void> {
   if (!userId) {
@@ -62,7 +70,34 @@ export async function registerRoutes(userId: string, routes: Route[]): Promise<v
 
   const redis = getRedisClient();
   const key = getRoutesKey(userId);
-  const value = JSON.stringify(routes);
+
+  // Get existing routes to merge with
+  const existingValue = await redis.get(key);
+  let existingRoutes: Route[] = [];
+
+  if (existingValue) {
+    try {
+      existingRoutes = JSON.parse(existingValue) as Route[];
+    } catch {
+      // Invalid data, start fresh
+      existingRoutes = [];
+    }
+  }
+
+  // Create a map of existing routes by ip:port
+  const routeMap = new Map<string, Route>();
+  for (const route of existingRoutes) {
+    routeMap.set(getRouteKey(route), route);
+  }
+
+  // Merge/update with new routes
+  for (const route of routes) {
+    routeMap.set(getRouteKey(route), route);
+  }
+
+  // Convert back to array
+  const mergedRoutes = Array.from(routeMap.values());
+  const value = JSON.stringify(mergedRoutes);
 
   await redis.setex(key, ROUTES_TTL_SECONDS, value);
 }
