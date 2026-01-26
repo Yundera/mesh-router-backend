@@ -1,4 +1,5 @@
 import { getRedisClient } from "../redis/redisClient.js";
+import { getRoutesTtl } from "../configuration/config.js";
 
 /**
  * Health check configuration for a route.
@@ -17,12 +18,6 @@ export interface Route {
   priority: number;                // Lower number = higher priority (1 = direct, 2 = tunnel)
   healthCheck?: RouteHealthCheck;  // Optional health check configuration
 }
-
-/**
- * TTL for route entries in seconds.
- * Routes expire if not refreshed within this time.
- */
-const ROUTES_TTL_SECONDS = 600; // 10 minutes
 
 /**
  * Get the Redis key for a user's routes.
@@ -99,7 +94,7 @@ export async function registerRoutes(userId: string, routes: Route[]): Promise<v
   const mergedRoutes = Array.from(routeMap.values());
   const value = JSON.stringify(mergedRoutes);
 
-  await redis.setex(key, ROUTES_TTL_SECONDS, value);
+  await redis.setex(key, getRoutesTtl(), value);
 }
 
 /**

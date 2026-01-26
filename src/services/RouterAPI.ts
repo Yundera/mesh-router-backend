@@ -1,9 +1,9 @@
 import express from "express";
 import {verifySignature} from "../library/KeyLib.js";
 import {authenticate, AuthUserRequest} from "./ExpressAuthenticateMiddleWare.js";
-import {checkDomainAvailability, deleteUserDomain, getUserDomain, updateUserDomain, registerHostIp, resolveDomainToIp, updateHeartbeat, checkOnlineStatus, getDomain} from "./Domain.js";
+import {checkDomainAvailability, deleteUserDomain, getUserDomain, updateUserDomain, updateHeartbeat, checkOnlineStatus, getDomain} from "./Domain.js";
 import {getServerDomain} from "../configuration/config.js";
-import {registerRoutes, getRoutes, deleteRoutes, Route} from "./Routes.js";
+import {registerRoutes, getRoutes, deleteRoutes, Route, getRoutesTTL} from "./Routes.js";
 
 /*
 full domain = domainName+"."+serverDomain
@@ -122,77 +122,6 @@ export function routerAPI(expressApp: express.Application) {
       return res.status(200).json({ message: "Domain information deleted successfully." });
     } catch (error) {
       console.error("Error in DELETE /domain", error);
-      return res.status(500).json({ error: error.toString() });
-    }
-  });
-
-  /**
-   * POST /ip/:userid/:sig
-   * Registers the host IP and optional target port for a user, authenticated via signature.
-   * Body: { hostIp: string, targetPort?: number }
-   * The signature must be a valid Ed25519 signature of the userid using the user's registered public key.
-   */
-  router.post('/ip/:userid/:sig', async (req, res) => {
-    const { userid, sig } = req.params;
-    const { hostIp, targetPort } = req.body;
-
-    try {
-      if (!hostIp) {
-        return res.status(400).json({ error: "hostIp is required in request body." });
-      }
-
-      const userData = await getUserDomain(userid);
-
-      if (!userData) {
-        return res.status(404).json({ error: "User not found. Register a domain first." });
-      }
-
-      // Verify signature using stored public key
-      let isValid = false;
-      try {
-        isValid = await verifySignature(userData.publicKey, sig, userid);
-      } catch (e) {
-        // Invalid signature format (e.g., non-base36 characters)
-        console.log('Invalid signature format', { userid, error: e.message });
-        return res.status(401).json({ error: "Invalid signature." });
-      }
-      const resolvedTargetPort = targetPort ?? 443;
-      console.log('Verifying signature for IP registration', { userid, hostIp, targetPort: resolvedTargetPort, isValid });
-
-      if (!isValid) {
-        return res.status(401).json({ error: "Invalid signature." });
-      }
-
-      await registerHostIp(userid, hostIp, resolvedTargetPort);
-      return res.status(200).json({
-        message: "Host IP registered successfully.",
-        hostIp,
-        targetPort: resolvedTargetPort,
-        domain: `${userData.domainName}.${getServerDomain()}`
-      });
-    } catch (error) {
-      console.error("Error in POST /ip/:userid/:sig", error);
-      return res.status(500).json({ error: error.toString() });
-    }
-  });
-
-  /**
-   * GET /resolve/:domain
-   * Public endpoint - resolves a domain name to its host IP (like DNS).
-   * :domain is the subdomain part (e.g., "alice" for alice.nsl.sh)
-   */
-  router.get('/resolve/:domain', async (req, res) => {
-    try {
-      const domain = req.params.domain.trim().toLowerCase();
-      const result = await resolveDomainToIp(domain);
-
-      if (!result) {
-        return res.status(404).json({ error: "Domain not found or no IP registered." });
-      }
-
-      return res.status(200).json(result);
-    } catch (error) {
-      console.error("Error in GET /resolve/:domain", error);
       return res.status(500).json({ error: error.toString() });
     }
   });
@@ -418,6 +347,10 @@ export function routerAPI(expressApp: express.Application) {
    * Returns identity info from Firestore + routes from Redis.
    *
    * :domain is the subdomain part (e.g., "alice" for alice.nsl.sh)
+   *
+   * Response includes:
+   * - routesTtl: seconds until routes expire (from Redis TTL), -2 if no routes
+   * - lastSeenOnline: user's last heartbeat timestamp (informational)
    */
   router.get('/resolve/v2/:domain', async (req, res) => {
     try {
@@ -433,11 +366,16 @@ export function routerAPI(expressApp: express.Application) {
       // Get routes from Redis
       const routes = await getRoutes(domainData.uid);
 
+      // Get routes TTL from Redis
+      const routesTtl = await getRoutesTTL(domainData.uid);
+
       return res.status(200).json({
         userId: domainData.uid,
         domainName: domainData.domain.domainName,
         serverDomain: getServerDomain(),
         routes: routes || [],  // Empty array if no routes registered
+        routesTtl,  // Seconds until routes expire (-2 if no routes)
+        lastSeenOnline: domainData.domain.lastSeenOnline || null,  // Informational
       });
     } catch (error) {
       console.error("Error in GET /resolve/v2/:domain", error);

@@ -1,6 +1,6 @@
 # mesh-router-backend
 
-Express.js API for NSL Router domain management and host IP resolution. Handles user domain registration, verification, and IP-to-domain mapping for the mesh network.
+Express.js API for NSL Router domain management and route resolution. Handles user domain registration, verification, and multi-route management for the mesh network.
 
 ## API Endpoints
 
@@ -14,12 +14,21 @@ Express.js API for NSL Router domain management and host IP resolution. Handles 
 | DELETE | `/domain` | Firebase | Delete user's domain |
 | GET | `/verify/:userid/:sig` | Public | Verify domain ownership via Ed25519 signature |
 
-### IP Registration
+### Routes v2 API (Redis-backed)
 
 | Method | Endpoint | Auth | Description |
 |--------|----------|------|-------------|
-| POST | `/ip/:userid/:sig` | Ed25519 Signature | Register host IP for a user |
-| GET | `/resolve/:domain` | Public | Resolve domain name to host IP |
+| POST | `/routes/:userid/:sig` | Ed25519 Signature | Register routes for a user |
+| DELETE | `/routes/:userid/:sig` | Ed25519 Signature | Delete all routes for a user |
+| GET | `/routes/:userid` | Public | Get routes for a user |
+| GET | `/resolve/v2/:domain` | Public | Resolve domain to routes with TTL info |
+
+### Heartbeat & Status
+
+| Method | Endpoint | Auth | Description |
+|--------|----------|------|-------------|
+| POST | `/heartbeat/:userid/:sig` | Ed25519 Signature | Update online status |
+| GET | `/status/:userid` | Public | Check if user is online |
 
 ### Example Usage
 
@@ -28,19 +37,19 @@ Express.js API for NSL Router domain management and host IP resolution. Handles 
 curl http://localhost:8192/available/myname
 # Response: {"available":true,"message":"Domain name is available."}
 
-# Resolve domain to host IP (like DNS)
-curl http://localhost:8192/resolve/myname
-# Response: {"hostIp":"10.77.0.5","domainName":"myname","serverDomain":"<SERVER_DOMAIN>"}
+# Resolve domain to routes (v2 API)
+curl http://localhost:8192/resolve/v2/myname
+# Response: {"userId":"abc123","domainName":"myname","serverDomain":"nsl.sh","routes":[{"ip":"10.77.0.5","port":443,"priority":1}],"routesTtl":580,"lastSeenOnline":"2024-01-15T10:30:00Z"}
 
-# Register host IP (requires Ed25519 signature of userid)
-curl -X POST http://localhost:8192/ip/{userid}/{signature} \
+# Register routes (requires Ed25519 signature of userid)
+curl -X POST http://localhost:8192/routes/{userid}/{signature} \
   -H "Content-Type: application/json" \
-  -d '{"hostIp": "10.77.0.5"}'
-# Response: {"message":"host IP registered successfully.","hostIp":"10.77.0.5","domain":"myname.<SERVER_DOMAIN>"}
+  -d '{"routes": [{"ip": "10.77.0.5", "port": 443, "priority": 1}]}'
+# Response: {"message":"Routes registered successfully.","routes":[...],"domain":"myname.nsl.sh"}
 
 # Verify domain ownership
 curl http://localhost:8192/verify/{userid}/{signature}
-# Response: {"serverDomain":"<SERVER_DOMAIN>","domainName":"myname"}
+# Response: {"serverDomain":"nsl.sh","domainName":"myname"}
 ```
 
 ## Getting Started
@@ -56,8 +65,10 @@ pnpm install
 **Environment Variables**:
 | Variable | Required | Description |
 |----------|----------|-------------|
-| `SERVER_DOMAIN` | Yes | The server domain suffix for all user domains (e.g., `nsl.sh`, `inojob.com`) |
+| `SERVER_DOMAIN` | Yes | The server domain suffix for all user domains (e.g., `nsl.sh`) |
 | `GOOGLE_APPLICATION_CREDENTIALS` | Yes | Path to Firebase service account JSON |
+| `REDIS_URL` | Yes | Redis connection URL (e.g., `redis://localhost:6379`) |
+| `ROUTES_TTL_SECONDS` | No | TTL for route entries in seconds (default: 600) |
 | `SERVICE_API_KEY` | No | API key for service-to-service authentication |
 
 **Service Account** (required):
@@ -111,13 +122,16 @@ npx dockflow publish
 src/
 ├── index.ts                    # Express app entry point
 ├── configuration/
-│   └── config.ts               # Environment configuration (SERVER_DOMAIN)
+│   └── config.ts               # Environment configuration (SERVER_DOMAIN, ROUTES_TTL)
 ├── services/
 │   ├── RouterAPI.ts            # API endpoint definitions
 │   ├── Domain.ts               # Domain business logic
+│   ├── Routes.ts               # Redis-backed route management
 │   └── ExpressAuthenticateMiddleWare.ts
 ├── firebase/
 │   └── firebaseIntegration.ts  # Firebase Admin SDK setup
+├── redis/
+│   └── redisClient.ts          # Redis client configuration
 ├── library/
 │   └── KeyLib.ts               # Ed25519 signature utilities
 ├── DataBaseDTO/
@@ -127,6 +141,14 @@ src/
     ├── test-app.ts             # Test app factory
     └── test-helpers.ts         # Test utilities
 ```
+
+## Route System
+
+Routes are stored in Redis with automatic TTL expiration:
+- Routes expire after `ROUTES_TTL_SECONDS` (default: 600 seconds / 10 minutes)
+- Agents refresh their routes every ~300 seconds (implicit heartbeat)
+- Routes are merged by `ip:port` key, allowing multiple sources (agent + tunnel)
+- `/resolve/v2/:domain` returns `routesTtl` showing seconds until expiration
 
 ## Domain Configuration
 
@@ -138,3 +160,4 @@ The `serverDomain` field stored in Firestore is informational/audit only - it re
 
 - [Firebase Admin SDK](https://github.com/firebase/firebase-admin-node)
 - [libsodium (Ed25519 signatures)](https://github.com/jedisct1/libsodium.js)
+- [ioredis](https://github.com/redis/ioredis)

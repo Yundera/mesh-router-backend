@@ -7,7 +7,6 @@ import {
   createTestUser,
   deleteTestUser,
   signMessage,
-  getTestUserData,
   cleanupAllTestUsers,
   cleanupAllTestRoutes,
   getTestUserRoutes,
@@ -16,7 +15,7 @@ import {
 } from "./test-helpers.js";
 import type { Application } from "express";
 
-describe("IP Registration API", () => {
+describe("Domain API", () => {
   let app: Application;
   let testUserId: string;
   let testKeys: { publicKey: string; privateKey: string };
@@ -45,264 +44,6 @@ describe("IP Registration API", () => {
     } catch (e) {
       // Ignore if already deleted
     }
-  });
-
-  describe("POST /ip/:userid/:sig", () => {
-    it("should register Host IP with valid signature", async () => {
-      const hostIp = "10.77.0.100";
-      const signature = await signMessage(testKeys.privateKey, testUserId);
-
-      const response = await request(app)
-        .post(`/ip/${testUserId}/${signature}`)
-        .send({ hostIp })
-        .expect(200);
-
-      expect(response.body.message).to.equal("Host IP registered successfully.");
-      expect(response.body.hostIp).to.equal(hostIp);
-      expect(response.body.targetPort).to.equal(443); // Default port
-
-      // Verify in database
-      const userData = await getTestUserData(testUserId);
-      expect(userData?.hostIp).to.equal(hostIp);
-      expect(userData?.hostIpUpdatedAt).to.be.a("string");
-      expect(userData?.targetPort).to.equal(443);
-    });
-
-    it("should register Host IP with custom targetPort", async () => {
-      const hostIp = "10.77.0.100";
-      const targetPort = 8443;
-      const signature = await signMessage(testKeys.privateKey, testUserId);
-
-      const response = await request(app)
-        .post(`/ip/${testUserId}/${signature}`)
-        .send({ hostIp, targetPort })
-        .expect(200);
-
-      expect(response.body.message).to.equal("Host IP registered successfully.");
-      expect(response.body.hostIp).to.equal(hostIp);
-      expect(response.body.targetPort).to.equal(targetPort);
-
-      // Verify in database
-      const userData = await getTestUserData(testUserId);
-      expect(userData?.hostIp).to.equal(hostIp);
-      expect(userData?.targetPort).to.equal(targetPort);
-    });
-
-    it("should reject invalid signature", async () => {
-      const hostIp = "10.77.0.100";
-      const invalidSignature = "k1234567890invalidSignature";
-
-      const response = await request(app)
-        .post(`/ip/${testUserId}/${invalidSignature}`)
-        .send({ hostIp })
-        .expect(401);
-
-      expect(response.body.error).to.equal("Invalid signature.");
-    });
-
-    it("should reject missing hostIp in body", async () => {
-      const signature = await signMessage(testKeys.privateKey, testUserId);
-
-      const response = await request(app)
-        .post(`/ip/${testUserId}/${signature}`)
-        .send({})
-        .expect(400);
-
-      expect(response.body.error).to.equal("hostIp is required in request body.");
-    });
-
-    it("should reject invalid IP format", async () => {
-      const invalidIp = "not.an.ip.address";
-      const signature = await signMessage(testKeys.privateKey, testUserId);
-
-      const response = await request(app)
-        .post(`/ip/${testUserId}/${signature}`)
-        .send({ hostIp: invalidIp })
-        .expect(500); // Domain.ts throws error which results in 500
-
-      expect(response.body.error).to.include("Invalid IP address format");
-    });
-
-    it("should reject non-existent user", async () => {
-      const fakeUserId = "nonexistentuser12345";
-      const signature = await signMessage(testKeys.privateKey, fakeUserId);
-
-      const response = await request(app)
-        .post(`/ip/${fakeUserId}/${signature}`)
-        .send({ hostIp: "10.77.0.100" })
-        .expect(404);
-
-      expect(response.body.error).to.equal("User not found. Register a domain first.");
-    });
-
-    it("should accept valid full IPv6 address", async () => {
-      const hostIpv6 = "2001:0db8:85a3:0000:0000:8a2e:0370:7334";
-      const signature = await signMessage(testKeys.privateKey, testUserId);
-
-      const response = await request(app)
-        .post(`/ip/${testUserId}/${signature}`)
-        .send({ hostIp: hostIpv6 })
-        .expect(200);
-
-      expect(response.body.hostIp).to.equal(hostIpv6);
-    });
-
-    it("should accept compressed IPv6 address (::1)", async () => {
-      const hostIpv6 = "::1";
-      const signature = await signMessage(testKeys.privateKey, testUserId);
-
-      const response = await request(app)
-        .post(`/ip/${testUserId}/${signature}`)
-        .send({ hostIp: hostIpv6 })
-        .expect(200);
-
-      expect(response.body.hostIp).to.equal(hostIpv6);
-    });
-
-    it("should accept compressed IPv6 address (fe80::1)", async () => {
-      const hostIpv6 = "fe80::1";
-      const signature = await signMessage(testKeys.privateKey, testUserId);
-
-      const response = await request(app)
-        .post(`/ip/${testUserId}/${signature}`)
-        .send({ hostIp: hostIpv6 })
-        .expect(200);
-
-      expect(response.body.hostIp).to.equal(hostIpv6);
-    });
-
-    it("should accept compressed IPv6 address (2001:db8::)", async () => {
-      const hostIpv6 = "2001:db8::";
-      const signature = await signMessage(testKeys.privateKey, testUserId);
-
-      const response = await request(app)
-        .post(`/ip/${testUserId}/${signature}`)
-        .send({ hostIp: hostIpv6 })
-        .expect(200);
-
-      expect(response.body.hostIp).to.equal(hostIpv6);
-    });
-
-    it("should reject invalid IPv6 with multiple ::", async () => {
-      const invalidIpv6 = "2001::db8::1";
-      const signature = await signMessage(testKeys.privateKey, testUserId);
-
-      const response = await request(app)
-        .post(`/ip/${testUserId}/${signature}`)
-        .send({ hostIp: invalidIpv6 })
-        .expect(500);
-
-      expect(response.body.error).to.include("Invalid IP address format");
-    });
-
-    it("should update existing IP with new value", async () => {
-      const firstIp = "10.77.0.100";
-      const secondIp = "10.77.0.200";
-      const signature = await signMessage(testKeys.privateKey, testUserId);
-
-      // Register first IP
-      await request(app)
-        .post(`/ip/${testUserId}/${signature}`)
-        .send({ hostIp: firstIp })
-        .expect(200);
-
-      // Update with second IP
-      await request(app)
-        .post(`/ip/${testUserId}/${signature}`)
-        .send({ hostIp: secondIp })
-        .expect(200);
-
-      // Verify updated
-      const userData = await getTestUserData(testUserId);
-      expect(userData?.hostIp).to.equal(secondIp);
-    });
-  });
-
-  describe("GET /resolve/:domain", () => {
-    it("should resolve domain to IP with default targetPort", async () => {
-      const hostIp = "10.77.0.150";
-      const signature = await signMessage(testKeys.privateKey, testUserId);
-      // domainName is the same as testUserId (alphanumeric)
-      const domainName = testUserId;
-
-      // First register the IP
-      await request(app)
-        .post(`/ip/${testUserId}/${signature}`)
-        .send({ hostIp })
-        .expect(200);
-
-      // Then resolve it
-      const response = await request(app)
-        .get(`/resolve/${domainName}`)
-        .expect(200);
-
-      expect(response.body.hostIp).to.equal(hostIp);
-      expect(response.body.targetPort).to.equal(443);
-      expect(response.body.domainName).to.equal(domainName);
-      expect(response.body.serverDomain).to.equal(TEST_SERVER_DOMAIN);
-    });
-
-    it("should resolve domain to IP with custom targetPort", async () => {
-      const hostIp = "10.77.0.151";
-      const targetPort = 8443;
-      const signature = await signMessage(testKeys.privateKey, testUserId);
-      const domainName = testUserId;
-
-      // First register the IP with custom port
-      await request(app)
-        .post(`/ip/${testUserId}/${signature}`)
-        .send({ hostIp, targetPort })
-        .expect(200);
-
-      // Then resolve it
-      const response = await request(app)
-        .get(`/resolve/${domainName}`)
-        .expect(200);
-
-      expect(response.body.hostIp).to.equal(hostIp);
-      expect(response.body.targetPort).to.equal(targetPort);
-      expect(response.body.domainName).to.equal(domainName);
-    });
-
-    it("should return 404 for unknown domain", async () => {
-      const response = await request(app)
-        .get("/resolve/nonexistentdomain12345")
-        .expect(404);
-
-      expect(response.body.error).to.equal("Domain not found or no IP registered.");
-    });
-
-    it("should return 404 for domain without IP registered", async () => {
-      // User exists but has no IP registered yet
-      // domainName is the same as testUserId
-      const domainName = testUserId;
-
-      const response = await request(app)
-        .get(`/resolve/${domainName}`)
-        .expect(404);
-
-      expect(response.body.error).to.equal("Domain not found or no IP registered.");
-    });
-
-    it("should handle case-insensitive domain lookup", async () => {
-      const hostIp = "10.77.0.160";
-      const signature = await signMessage(testKeys.privateKey, testUserId);
-      // domainName is the same as testUserId
-      const domainName = testUserId;
-
-      // Register IP
-      await request(app)
-        .post(`/ip/${testUserId}/${signature}`)
-        .send({ hostIp })
-        .expect(200);
-
-      // Resolve with uppercase (should be normalized to lowercase)
-      const response = await request(app)
-        .get(`/resolve/${domainName.toUpperCase()}`)
-        .expect(200);
-
-      expect(response.body.hostIp).to.equal(hostIp);
-    });
   });
 
   describe("GET /available/:domain", () => {
@@ -556,7 +297,7 @@ describe("Routes v2 API", () => {
       expect(response.body.routes[0].healthCheck.host).to.be.undefined;
     });
 
-    it("should update existing routes (refresh)", async () => {
+    it("should update existing route with same ip:port (refresh TTL)", async () => {
       const signature = await signMessage(testKeys.privateKey, testUserId);
 
       // Register first route
@@ -565,16 +306,37 @@ describe("Routes v2 API", () => {
         .send({ routes: [{ ip: "10.77.0.100", port: 443, priority: 1 }] })
         .expect(200);
 
-      // Update with new route
+      // Refresh same route with updated priority (same ip:port)
       await request(app)
         .post(`/routes/${testUserId}/${signature}`)
-        .send({ routes: [{ ip: "10.77.0.200", port: 8443, priority: 1 }] })
+        .send({ routes: [{ ip: "10.77.0.100", port: 443, priority: 2 }] })
         .expect(200);
 
       const storedRoutes = await getTestUserRoutes(testUserId);
       expect(storedRoutes).to.have.lengthOf(1);
-      expect(storedRoutes![0].ip).to.equal("10.77.0.200");
-      expect(storedRoutes![0].port).to.equal(8443);
+      expect(storedRoutes![0].ip).to.equal("10.77.0.100");
+      expect(storedRoutes![0].port).to.equal(443);
+      expect(storedRoutes![0].priority).to.equal(2); // Updated priority
+    });
+
+    it("should merge routes from different ip:port (multi-source)", async () => {
+      const signature = await signMessage(testKeys.privateKey, testUserId);
+
+      // Register first route (e.g., from agent)
+      await request(app)
+        .post(`/routes/${testUserId}/${signature}`)
+        .send({ routes: [{ ip: "10.77.0.100", port: 443, priority: 1 }] })
+        .expect(200);
+
+      // Register second route (e.g., from tunnel) - different ip:port
+      await request(app)
+        .post(`/routes/${testUserId}/${signature}`)
+        .send({ routes: [{ ip: "10.77.0.200", port: 8443, priority: 2 }] })
+        .expect(200);
+
+      // Both routes should exist (merged)
+      const storedRoutes = await getTestUserRoutes(testUserId);
+      expect(storedRoutes).to.have.lengthOf(2);
     });
 
     it("should reject invalid signature", async () => {
@@ -721,7 +483,7 @@ describe("Routes v2 API", () => {
   });
 
   describe("GET /resolve/v2/:domain", () => {
-    it("should resolve domain to routes", async () => {
+    it("should resolve domain to routes with TTL info", async () => {
       const signature = await signMessage(testKeys.privateKey, testUserId);
       const domainName = testUserId; // domainName equals userId in tests
 
@@ -745,9 +507,13 @@ describe("Routes v2 API", () => {
       expect(response.body.routes).to.have.lengthOf(2);
       expect(response.body.routes[0].ip).to.equal("203.0.113.5");
       expect(response.body.routes[1].ip).to.equal("10.77.0.100");
+      // Verify TTL info is included
+      expect(response.body.routesTtl).to.be.a("number");
+      expect(response.body.routesTtl).to.be.greaterThan(0);
+      expect(response.body).to.have.property("lastSeenOnline");
     });
 
-    it("should return empty routes array for domain without routes", async () => {
+    it("should return routesTtl as -2 for domain without routes", async () => {
       const domainName = testUserId;
 
       const response = await request(app)
@@ -756,6 +522,9 @@ describe("Routes v2 API", () => {
 
       expect(response.body.userId).to.equal(testUserId);
       expect(response.body.routes).to.be.an("array").that.is.empty;
+      // routesTtl is -2 when key doesn't exist (Redis TTL behavior)
+      expect(response.body.routesTtl).to.equal(-2);
+      expect(response.body.lastSeenOnline).to.be.null;
     });
 
     it("should return 404 for unknown domain", async () => {
@@ -782,6 +551,7 @@ describe("Routes v2 API", () => {
         .expect(200);
 
       expect(response.body.routes).to.have.lengthOf(1);
+      expect(response.body.routesTtl).to.be.a("number");
     });
   });
 });

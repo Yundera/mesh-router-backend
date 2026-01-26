@@ -10,3 +10,24 @@ export function getServerDomain(): string {
   }
   return serverDomain;
 }
+
+/**
+ * Default TTL for route entries in seconds.
+ */
+const DEFAULT_ROUTES_TTL_SECONDS = 600; // 10 minutes
+
+/**
+ * Returns the TTL for route entries from environment or default.
+ * Routes expire if not refreshed within this time.
+ * @returns TTL in seconds
+ */
+export function getRoutesTtl(): number {
+  const envValue = process.env.ROUTES_TTL_SECONDS;
+  if (envValue) {
+    const parsed = parseInt(envValue, 10);
+    if (!isNaN(parsed) && parsed > 0) {
+      return parsed;
+    }
+  }
+  return DEFAULT_ROUTES_TTL_SECONDS;
+}
