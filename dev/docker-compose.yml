@@ -20,7 +20,8 @@ services:
       - ./entrypoint-dev.sh:/entrypoint-dev.sh:ro
 
       # Mount config directory (contains serviceAccount.json if present)
-      - ../config:/app/config:ro
+      # Note: Not read-only because CA auto-generates cert/key if missing
+      - ../config:/app/config
     environment:
       - NODE_ENV=development
       # Firebase config - uses config from parent directory

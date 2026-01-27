@@ -178,12 +178,14 @@ pnpm lint
 | DELETE | `/domain` | Firebase | Delete domain |
 | GET | `/verify/:userid/:sig` | Public | Verify domain ownership |
 
-### IP Registration (New)
+### Routes v2 API (Redis-backed)
 
 | Method | Endpoint | Auth | Description |
 |--------|----------|------|-------------|
-| POST | `/ip/:userid/:sig` | Ed25519 Signature | Register Host IP for user |
-| GET | `/resolve/:domain` | Public | Resolve domain to Host IP |
+| POST | `/routes/:userid/:sig` | Ed25519 Signature | Register routes for a user |
+| GET | `/routes/:userid` | Public | Get routes for a user |
+| DELETE | `/routes/:userid/:sig` | Ed25519 Signature | Delete routes for a user |
+| GET | `/resolve/v2/:domain` | Public | Resolve domain to routes |
 
 ### Example Usage
 
@@ -191,15 +193,15 @@ pnpm lint
 # Check domain availability
 curl http://localhost:8192/available/myname
 
-# Resolve domain to IP (like DNS)
-curl http://localhost:8192/resolve/myname
-# Response: {"hostIp":"10.77.0.5","domainName":"myname","serverDomain":"<SERVER_DOMAIN>"}
+# Resolve domain to routes (v2 API)
+curl http://localhost:8192/resolve/v2/myname
+# Response: {"userId":"abc123","domainName":"myname","serverDomain":"<SERVER_DOMAIN>","routes":[{"ip":"10.77.0.5","port":443,"priority":1}],"routesTtl":580}
 
-# Register IP (requires signature)
-curl -X POST http://localhost:8192/ip/{userid}/{signature} \
+# Register routes (requires signature)
+curl -X POST http://localhost:8192/routes/{userid}/{signature} \
   -H "Content-Type: application/json" \
-  -d '{"hostIp": "10.77.0.5"}'
-# Response: {"message":"Host IP registered successfully.","hostIp":"10.77.0.5","domain":"myname.<SERVER_DOMAIN>"}
+  -d '{"routes": [{"ip": "10.77.0.5", "port": 443, "priority": 1}]}'
+# Response: {"message":"Routes registered successfully.","routes":[...],"domain":"myname.<SERVER_DOMAIN>"}
 ```
 
 > **Note:** `serverDomain` in responses comes from the `SERVER_DOMAIN` environment variable.

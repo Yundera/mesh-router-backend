@@ -1,6 +1,6 @@
 # mesh-router-backend
 
-Express.js API for NSL Router domain management and route resolution. Handles user domain registration, verification, and multi-route management for the mesh network.
+Express.js API for Mesh Router domain management and route resolution. Handles user domain registration, verification, and multi-route management for the mesh network.
 
 ## API Endpoints
 

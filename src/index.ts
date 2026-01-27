@@ -2,6 +2,7 @@ import cors from "cors";
 import express from "express";
 
 import {initializeFb} from "./firebase/firebaseIntegration.js";
+import {initializeCA} from "./services/CertificateAuthority.js";
 import {routerAPI} from "./services/RouterAPI.js";
 
 import 'dotenv/config';
@@ -11,8 +12,9 @@ expressApp.use(express.json());
 expressApp.use(cors());
 
 const port = 8192;
-expressApp.listen(port, () => {
+expressApp.listen(port, async () => {
     initializeFb();
+    await initializeCA();
     routerAPI(expressApp);
     console.log('Listening on ' + port);
 });
