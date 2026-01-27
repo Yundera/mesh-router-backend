@@ -1,10 +1,27 @@
-import express from "express";
+import express, { Request } from "express";
 import {verifySignature} from "../library/KeyLib.js";
 import {authenticate, AuthUserRequest} from "./ExpressAuthenticateMiddleWare.js";
 import {checkDomainAvailability, deleteUserDomain, getUserDomain, updateUserDomain, updateHeartbeat, checkOnlineStatus, getDomain} from "./Domain.js";
 import {getServerDomain} from "../configuration/config.js";
 import {registerRoutes, getRoutes, deleteRoutes, Route, getRoutesTTL} from "./Routes.js";
 import {getCACertificate, signCSR, isCAInitialized} from "./CertificateAuthority.js";
+
+/**
+ * Logs authentication failures with relevant context for security monitoring.
+ */
+function logAuthFailure(req: Request, reason: string, context: Record<string, unknown> = {}): void {
+  const clientIp = req.ip || req.socket?.remoteAddress || 'unknown';
+  const userAgent = req.get('User-Agent') || 'unknown';
+
+  console.warn('AUTH_FAILURE', {
+    reason,
+    clientIp,
+    userAgent,
+    method: req.method,
+    path: req.path,
+    ...context,
+  });
+}
 
 /*
 full domain = domainName+"."+serverDomain
@@ -152,6 +169,7 @@ export function routerAPI(expressApp: express.Application) {
       }
 
       if (!isValid) {
+        logAuthFailure(req, 'invalid_signature', { userid, endpoint: 'heartbeat' });
         return res.status(401).json({ error: "Invalid signature." });
       }
 
@@ -231,6 +249,7 @@ export function routerAPI(expressApp: express.Application) {
       }
 
       if (!isValid) {
+        logAuthFailure(req, 'invalid_signature', { userid, endpoint: 'routes_registration' });
         return res.status(401).json({ error: "Invalid signature." });
       }
 
@@ -304,6 +323,7 @@ export function routerAPI(expressApp: express.Application) {
       }
 
       if (!isValid) {
+        logAuthFailure(req, 'invalid_signature', { userid, endpoint: 'routes_deletion' });
         return res.status(401).json({ error: "Invalid signature." });
       }
 
@@ -453,6 +473,7 @@ export function routerAPI(expressApp: express.Application) {
       }
 
       if (!isValid) {
+        logAuthFailure(req, 'invalid_signature', { userid, endpoint: 'cert_request' });
         return res.status(401).json({ error: "Invalid signature." });
       }
 
