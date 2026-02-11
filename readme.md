@@ -30,6 +30,13 @@ Express.js API for Mesh Router domain management and route resolution. Handles u
 | POST | `/heartbeat/:userid/:sig` | Ed25519 Signature | Update online status |
 | GET | `/status/:userid` | Public | Check if user is online |
 
+### Certificate Authority (Private PKI)
+
+| Method | Endpoint | Auth | Description |
+|--------|----------|------|-------------|
+| GET | `/ca-cert` | Public | Get CA public certificate (PEM format) |
+| POST | `/cert/:userid/:sig` | Ed25519 Signature | Sign a CSR and get certificate |
+
 ### Example Usage
 
 ```bash
@@ -70,6 +77,9 @@ pnpm install
 | `REDIS_URL` | Yes | Redis connection URL (e.g., `redis://localhost:6379`) |
 | `ROUTES_TTL_SECONDS` | No | TTL for route entries in seconds (default: 600) |
 | `SERVICE_API_KEY` | No | API key for service-to-service authentication |
+| `CA_CERT_PATH` | No | Path to CA certificate for PKI (default: `config/ca-cert.pem`) |
+| `CA_KEY_PATH` | No | Path to CA private key for PKI (default: `config/ca-key.pem`) |
+| `CERT_VALIDITY_HOURS` | No | Certificate validity in hours (default: 72) |
 
 **Service Account** (required):
 - Path: `./config/serviceAccount.json`
