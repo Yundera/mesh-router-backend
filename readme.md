@@ -79,10 +79,10 @@ pnpm install
 
 #### Option 1: Docker (Recommended)
 
-See [dev/README.md](./dev/README.md) for the Docker-based development environment with hot reload.
+See [backend-dev/README.md](./backend-dev/README.md) for the Docker-based development environment with hot reload.
 
 ```bash
-cd dev
+cd backend-dev
 ./start.sh      # Linux/Mac
 .\start.ps1     # Windows
 ```
@@ -99,7 +99,7 @@ pnpm exec       # Build and run
 
 ```bash
 # Using Docker dev environment
-cd dev
+cd backend-dev
 ./test.sh       # Linux/Mac
 .\test.ps1      # Windows
 

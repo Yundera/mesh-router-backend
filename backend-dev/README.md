@@ -86,7 +86,7 @@ IP Registration API
 ## Architecture
 
 ```
-dev/
+backend-dev/
 ├── Dockerfile.dev        # Node 22 Alpine + pnpm (thin image)
 ├── docker-compose.yml    # Service definition with volume mounts
 ├── entrypoint-dev.sh     # Smart startup script

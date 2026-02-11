@@ -15,7 +15,7 @@ API integration tests for mesh-router-backend using Mocha, Chai, and Supertest.
 Tests must be run inside Docker (requires Redis and Firebase credentials):
 
 ```bash
-cd mesh-router-backend/dev
+cd mesh-router-backend/backend-dev
 docker compose run --rm mesh-router-backend pnpm test
 ```
 
