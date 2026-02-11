@@ -2,7 +2,7 @@ import { generateKeyPair, sign } from "../library/KeyLib.js";
 import admin from "firebase-admin";
 import { NSL_ROUTER_COLLECTION, NSLRouterData } from "../DataBaseDTO/DataBaseNSLRouter.js";
 import { getRedisClient } from "../redis/redisClient.js";
-import { deleteRoutes, getRoutes, Route } from "../services/Routes.js";
+import { deleteRoutes, getRoutes, getRoutesTTL, Route } from "../services/Routes.js";
 
 // Test user prefix to identify test data (alphanumeric only for domain validation)
 export const TEST_USER_PREFIX = "testuser";
@@ -116,4 +116,19 @@ export async function cleanupAllTestRoutes(): Promise<void> {
     await redis.del(...keys);
     console.log(`[Test Cleanup] Deleted ${keys.length} test route entries from Redis`);
   }
+}
+
+/**
+ * Get TTL for routes from Redis for a test user
+ * @returns TTL in seconds, -1 if no TTL, -2 if key doesn't exist
+ */
+export async function getTestUserRoutesTTL(userId: string): Promise<number> {
+  return getRoutesTTL(userId);
+}
+
+/**
+ * Sleep for specified milliseconds
+ */
+export function sleep(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms));
 }

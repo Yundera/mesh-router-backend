@@ -11,6 +11,8 @@ import {
   cleanupAllTestRoutes,
   getTestUserRoutes,
   deleteTestUserRoutes,
+  getTestUserRoutesTTL,
+  sleep,
   TEST_SERVER_DOMAIN,
 } from "./test-helpers.js";
 import type { Application } from "express";
@@ -208,7 +210,7 @@ describe("Routes v2 API", () => {
     it("should register a single route with valid signature", async () => {
       const signature = await signMessage(testKeys.privateKey, testUserId);
       const routes = [
-        { ip: "10.77.0.100", port: 443, priority: 1 }
+        { ip: "10.77.0.100", port: 443, priority: 1, source: "agent" }
       ];
 
       const response = await request(app)
@@ -221,18 +223,20 @@ describe("Routes v2 API", () => {
       expect(response.body.routes[0].ip).to.equal("10.77.0.100");
       expect(response.body.routes[0].port).to.equal(443);
       expect(response.body.routes[0].priority).to.equal(1);
+      expect(response.body.routes[0].source).to.equal("agent");
 
       // Verify in Redis
       const storedRoutes = await getTestUserRoutes(testUserId);
       expect(storedRoutes).to.have.lengthOf(1);
       expect(storedRoutes![0].ip).to.equal("10.77.0.100");
+      expect(storedRoutes![0].source).to.equal("agent");
     });
 
     it("should register multiple routes (direct + tunnel)", async () => {
       const signature = await signMessage(testKeys.privateKey, testUserId);
       const routes = [
-        { ip: "203.0.113.5", port: 443, priority: 1 },   // Direct
-        { ip: "10.77.0.100", port: 80, priority: 2 }     // Tunnel
+        { ip: "203.0.113.5", port: 443, priority: 1, source: "agent" },   // Direct
+        { ip: "10.77.0.100", port: 80, priority: 2, source: "tunnel" }     // Tunnel
       ];
 
       const response = await request(app)
@@ -253,6 +257,7 @@ describe("Routes v2 API", () => {
           ip: "10.77.0.100",
           port: 443,
           priority: 1,
+          source: "agent",
           healthCheck: {
             path: "/.well-known/health",
             host: "alice.nsl.sh"
@@ -282,6 +287,7 @@ describe("Routes v2 API", () => {
           ip: "10.77.0.100",
           port: 443,
           priority: 1,
+          source: "agent",
           healthCheck: {
             path: "/health"
           }
@@ -303,13 +309,13 @@ describe("Routes v2 API", () => {
       // Register first route
       await request(app)
         .post(`/routes/${testUserId}/${signature}`)
-        .send({ routes: [{ ip: "10.77.0.100", port: 443, priority: 1 }] })
+        .send({ routes: [{ ip: "10.77.0.100", port: 443, priority: 1, source: "agent" }] })
         .expect(200);
 
-      // Refresh same route with updated priority (same ip:port)
+      // Refresh same route with updated priority (same ip:port, same source)
       await request(app)
         .post(`/routes/${testUserId}/${signature}`)
-        .send({ routes: [{ ip: "10.77.0.100", port: 443, priority: 2 }] })
+        .send({ routes: [{ ip: "10.77.0.100", port: 443, priority: 2, source: "agent" }] })
         .expect(200);
 
       const storedRoutes = await getTestUserRoutes(testUserId);
@@ -319,24 +325,86 @@ describe("Routes v2 API", () => {
       expect(storedRoutes![0].priority).to.equal(2); // Updated priority
     });
 
-    it("should merge routes from different ip:port (multi-source)", async () => {
+    it("should merge routes from different sources (agent + tunnel)", async () => {
       const signature = await signMessage(testKeys.privateKey, testUserId);
 
-      // Register first route (e.g., from agent)
+      // Register first route from agent
       await request(app)
         .post(`/routes/${testUserId}/${signature}`)
-        .send({ routes: [{ ip: "10.77.0.100", port: 443, priority: 1 }] })
+        .send({ routes: [{ ip: "10.77.0.100", port: 443, priority: 1, source: "agent" }] })
         .expect(200);
 
-      // Register second route (e.g., from tunnel) - different ip:port
+      // Register second route from tunnel - different source
       await request(app)
         .post(`/routes/${testUserId}/${signature}`)
-        .send({ routes: [{ ip: "10.77.0.200", port: 8443, priority: 2 }] })
+        .send({ routes: [{ ip: "10.77.0.200", port: 8443, priority: 2, source: "tunnel" }] })
         .expect(200);
 
-      // Both routes should exist (merged)
+      // Both routes should exist (merged - different sources)
       const storedRoutes = await getTestUserRoutes(testUserId);
       expect(storedRoutes).to.have.lengthOf(2);
+    });
+
+    it("should replace route when same source registers different IP", async () => {
+      const signature = await signMessage(testKeys.privateKey, testUserId);
+
+      // Register first route from agent with IP 1.1.1.1
+      await request(app)
+        .post(`/routes/${testUserId}/${signature}`)
+        .send({ routes: [{ ip: "1.1.1.1", port: 443, priority: 1, source: "agent" }] })
+        .expect(200);
+
+      // Register from same source (agent) with different IP 2.2.2.2
+      await request(app)
+        .post(`/routes/${testUserId}/${signature}`)
+        .send({ routes: [{ ip: "2.2.2.2", port: 443, priority: 1, source: "agent" }] })
+        .expect(200);
+
+      // Should only have ONE route (old replaced by new, not appended)
+      const storedRoutes = await getTestUserRoutes(testUserId);
+      expect(storedRoutes).to.have.lengthOf(1);
+      expect(storedRoutes![0].ip).to.equal("2.2.2.2");
+      expect(storedRoutes![0].source).to.equal("agent");
+    });
+
+    it("should replace only routes from same source, keeping others", async () => {
+      const signature = await signMessage(testKeys.privateKey, testUserId);
+
+      // Register routes from both agent and tunnel
+      await request(app)
+        .post(`/routes/${testUserId}/${signature}`)
+        .send({ routes: [
+          { ip: "1.1.1.1", port: 443, priority: 1, source: "agent" },
+          { ip: "10.77.0.1", port: 443, priority: 2, source: "tunnel" }
+        ]})
+        .expect(200);
+
+      // Agent's IP changes - register new IP from agent
+      await request(app)
+        .post(`/routes/${testUserId}/${signature}`)
+        .send({ routes: [{ ip: "2.2.2.2", port: 443, priority: 1, source: "agent" }] })
+        .expect(200);
+
+      // Should have 2 routes: new agent route + unchanged tunnel route
+      const storedRoutes = await getTestUserRoutes(testUserId);
+      expect(storedRoutes).to.have.lengthOf(2);
+
+      const agentRoute = storedRoutes!.find(r => r.source === "agent");
+      const tunnelRoute = storedRoutes!.find(r => r.source === "tunnel");
+
+      expect(agentRoute?.ip).to.equal("2.2.2.2");
+      expect(tunnelRoute?.ip).to.equal("10.77.0.1");
+    });
+
+    it("should reject route without source field", async () => {
+      const signature = await signMessage(testKeys.privateKey, testUserId);
+
+      const response = await request(app)
+        .post(`/routes/${testUserId}/${signature}`)
+        .send({ routes: [{ ip: "10.77.0.100", port: 443, priority: 1 }] })
+        .expect(500);
+
+      expect(response.body.error).to.include("source is required");
     });
 
     it("should reject invalid signature", async () => {
@@ -344,7 +412,7 @@ describe("Routes v2 API", () => {
 
       const response = await request(app)
         .post(`/routes/${testUserId}/${invalidSignature}`)
-        .send({ routes: [{ ip: "10.77.0.100", port: 443, priority: 1 }] })
+        .send({ routes: [{ ip: "10.77.0.100", port: 443, priority: 1, source: "agent" }] })
         .expect(401);
 
       expect(response.body.error).to.equal("Invalid signature.");
@@ -377,7 +445,7 @@ describe("Routes v2 API", () => {
 
       const response = await request(app)
         .post(`/routes/${testUserId}/${signature}`)
-        .send({ routes: [{ port: 443, priority: 1 }] })
+        .send({ routes: [{ port: 443, priority: 1, source: "agent" }] })
         .expect(500);
 
       expect(response.body.error).to.include("ip is required");
@@ -388,7 +456,7 @@ describe("Routes v2 API", () => {
 
       const response = await request(app)
         .post(`/routes/${testUserId}/${signature}`)
-        .send({ routes: [{ ip: "10.77.0.100", port: 99999, priority: 1 }] })
+        .send({ routes: [{ ip: "10.77.0.100", port: 99999, priority: 1, source: "agent" }] })
         .expect(500);
 
       expect(response.body.error).to.include("port must be between 1 and 65535");
@@ -400,7 +468,7 @@ describe("Routes v2 API", () => {
 
       const response = await request(app)
         .post(`/routes/${fakeUserId}/${signature}`)
-        .send({ routes: [{ ip: "10.77.0.100", port: 443, priority: 1 }] })
+        .send({ routes: [{ ip: "10.77.0.100", port: 443, priority: 1, source: "agent" }] })
         .expect(404);
 
       expect(response.body.error).to.equal("User not found. Register a domain first.");
@@ -414,7 +482,7 @@ describe("Routes v2 API", () => {
       // First register routes
       await request(app)
         .post(`/routes/${testUserId}/${signature}`)
-        .send({ routes: [{ ip: "10.77.0.100", port: 443, priority: 1 }] })
+        .send({ routes: [{ ip: "10.77.0.100", port: 443, priority: 1, source: "agent" }] })
         .expect(200);
 
       // Then delete them
@@ -458,8 +526,8 @@ describe("Routes v2 API", () => {
       await request(app)
         .post(`/routes/${testUserId}/${signature}`)
         .send({ routes: [
-          { ip: "10.77.0.100", port: 443, priority: 1 },
-          { ip: "10.77.0.200", port: 80, priority: 2 }
+          { ip: "10.77.0.100", port: 443, priority: 1, source: "agent" },
+          { ip: "10.77.0.200", port: 80, priority: 2, source: "tunnel" }
         ]})
         .expect(200);
 
@@ -491,8 +559,8 @@ describe("Routes v2 API", () => {
       await request(app)
         .post(`/routes/${testUserId}/${signature}`)
         .send({ routes: [
-          { ip: "203.0.113.5", port: 443, priority: 1 },
-          { ip: "10.77.0.100", port: 80, priority: 2 }
+          { ip: "203.0.113.5", port: 443, priority: 1, source: "agent" },
+          { ip: "10.77.0.100", port: 80, priority: 2, source: "tunnel" }
         ]})
         .expect(200);
 
@@ -542,7 +610,7 @@ describe("Routes v2 API", () => {
       // Register routes
       await request(app)
         .post(`/routes/${testUserId}/${signature}`)
-        .send({ routes: [{ ip: "10.77.0.100", port: 443, priority: 1 }]})
+        .send({ routes: [{ ip: "10.77.0.100", port: 443, priority: 1, source: "agent" }]})
         .expect(200);
 
       // Resolve with uppercase
@@ -552,6 +620,137 @@ describe("Routes v2 API", () => {
 
       expect(response.body.routes).to.have.lengthOf(1);
       expect(response.body.routesTtl).to.be.a("number");
+    });
+  });
+});
+
+// ============================================================================
+// Routes TTL Tests
+// ============================================================================
+
+describe("Routes TTL", () => {
+  let app: Application;
+  let testUserId: string;
+  let testKeys: { publicKey: string; privateKey: string };
+
+  before(async () => {
+    app = createTestApp();
+    await cleanupAllTestUsers();
+    await cleanupAllTestRoutes();
+  });
+
+  after(async () => {
+    await cleanupAllTestUsers();
+    await cleanupAllTestRoutes();
+  });
+
+  beforeEach(async () => {
+    testUserId = generateTestUserId();
+    testKeys = await createTestUser(testUserId);
+  });
+
+  afterEach(async () => {
+    try {
+      await deleteTestUser(testUserId);
+      await deleteTestUserRoutes(testUserId);
+    } catch {
+      // Ignore if already deleted
+    }
+  });
+
+  describe("TTL behavior", () => {
+    it("should set TTL when registering routes", async () => {
+      const signature = await signMessage(testKeys.privateKey, testUserId);
+
+      await request(app)
+        .post(`/routes/${testUserId}/${signature}`)
+        .send({ routes: [{ ip: "10.77.0.100", port: 443, priority: 1, source: "agent" }] })
+        .expect(200);
+
+      const ttl = await getTestUserRoutesTTL(testUserId);
+      // TTL should be positive (default is 600 seconds, but test env may differ)
+      expect(ttl).to.be.greaterThan(0);
+    });
+
+    it("should refresh TTL when re-registering routes", async () => {
+      const signature = await signMessage(testKeys.privateKey, testUserId);
+
+      // Register route
+      await request(app)
+        .post(`/routes/${testUserId}/${signature}`)
+        .send({ routes: [{ ip: "10.77.0.100", port: 443, priority: 1, source: "agent" }] })
+        .expect(200);
+
+      const ttl1 = await getTestUserRoutesTTL(testUserId);
+
+      // Wait a bit
+      await sleep(1100);
+
+      // Re-register (refresh)
+      await request(app)
+        .post(`/routes/${testUserId}/${signature}`)
+        .send({ routes: [{ ip: "10.77.0.100", port: 443, priority: 1, source: "agent" }] })
+        .expect(200);
+
+      const ttl2 = await getTestUserRoutesTTL(testUserId);
+
+      // TTL should be refreshed (ttl2 >= ttl1 because it was reset)
+      expect(ttl2).to.be.at.least(ttl1);
+    });
+
+    it("should return routesTtl in resolve response", async () => {
+      const signature = await signMessage(testKeys.privateKey, testUserId);
+
+      await request(app)
+        .post(`/routes/${testUserId}/${signature}`)
+        .send({ routes: [{ ip: "10.77.0.100", port: 443, priority: 1, source: "agent" }] })
+        .expect(200);
+
+      const response = await request(app)
+        .get(`/resolve/v2/${testUserId}`)
+        .expect(200);
+
+      expect(response.body.routesTtl).to.be.a("number");
+      expect(response.body.routesTtl).to.be.greaterThan(0);
+    });
+
+    it("should return -2 for routesTtl when no routes exist", async () => {
+      const response = await request(app)
+        .get(`/resolve/v2/${testUserId}`)
+        .expect(200);
+
+      expect(response.body.routesTtl).to.equal(-2);
+    });
+
+    it("should expire routes after TTL (requires ROUTES_TTL_SECONDS=2 in test env)", async function() {
+      // Skip this test in normal runs - only run with short TTL configured
+      // Set ROUTES_TTL_SECONDS=2 in test environment to run this test
+      const currentTtl = await getTestUserRoutesTTL(testUserId);
+      if (currentTtl === -2) {
+        // No routes yet, register one to check TTL
+        const signature = await signMessage(testKeys.privateKey, testUserId);
+        await request(app)
+          .post(`/routes/${testUserId}/${signature}`)
+          .send({ routes: [{ ip: "10.77.0.100", port: 443, priority: 1, source: "agent" }] })
+          .expect(200);
+
+        const ttl = await getTestUserRoutesTTL(testUserId);
+
+        // Only run expiration test if TTL is short (2-5 seconds)
+        if (ttl > 5) {
+          this.skip();
+          return;
+        }
+
+        // Wait for TTL to expire
+        await sleep((ttl + 1) * 1000);
+
+        // Routes should be gone
+        const routes = await getTestUserRoutes(testUserId);
+        expect(routes).to.be.null;
+      } else {
+        this.skip();
+      }
     });
   });
 });

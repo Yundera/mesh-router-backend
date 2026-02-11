@@ -17,6 +17,7 @@ export interface Route {
   port: number;                    // Port number
   priority: number;                // Lower number = higher priority (1 = direct, 2 = tunnel)
   healthCheck?: RouteHealthCheck;  // Optional health check configuration
+  source: string;                  // Source identifier (e.g., "agent", "tunnel") - routes from same source replace each other
 }
 
 /**
@@ -78,6 +79,11 @@ export async function registerRoutes(userId: string, routes: Route[]): Promise<v
       existingRoutes = [];
     }
   }
+
+  // Filter out existing routes that have the same source as incoming routes
+  // This ensures routes from the same source replace each other entirely
+  const incomingSources = new Set(routes.map(r => r.source));
+  existingRoutes = existingRoutes.filter(r => !incomingSources.has(r.source));
 
   // Create a map of existing routes by ip:port
   const routeMap = new Map<string, Route>();

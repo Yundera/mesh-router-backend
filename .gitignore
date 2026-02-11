@@ -27,4 +27,6 @@ yarn-error.log*
 /.idea
 
 config/**.json
+config/ca-cert.pem
+config/ca-key.pem
 .pnpm-store/**

@@ -264,11 +264,15 @@ export function routerAPI(expressApp: express.Application) {
         if (typeof r.priority !== 'number') {
           throw new Error(`Route ${index}: priority is required.`);
         }
+        if (!r.source || typeof r.source !== 'string') {
+          throw new Error(`Route ${index}: source is required.`);
+        }
 
         const route: Route = {
           ip: r.ip,
           port: r.port,
           priority: r.priority,
+          source: r.source,
         };
 
         // Add health check if provided
