@@ -39,6 +39,19 @@ export function routerAPI(expressApp: express.Application) {
   let router = express.Router();
 
   /**
+   * GET /version
+   * Returns API version information for client compatibility checks.
+   * Clients should check this endpoint before connecting to ensure compatibility.
+   */
+  router.get('/version', (req, res) => {
+    return res.status(200).json({
+      version: 2,
+      minClientVersion: 2,
+      serverDomain: process.env.SERVER_DOMAIN || 'unknown',
+    });
+  });
+
+  /**
    * GET /available/:domain
    * Checks if a domain name is available.
    */
