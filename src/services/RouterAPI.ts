@@ -1,10 +1,12 @@
 import express, { Request } from "express";
 import {verifySignature} from "../library/KeyLib.js";
 import {authenticate, AuthUserRequest} from "./ExpressAuthenticateMiddleWare.js";
-import {checkDomainAvailability, deleteUserDomain, getUserDomain, updateUserDomain, updateHeartbeat, checkOnlineStatus, getDomain} from "./Domain.js";
-import {getServerDomain} from "../configuration/config.js";
-import {registerRoutes, getRoutes, deleteRoutes, Route, getRoutesTTL} from "./Routes.js";
+import {checkDomainAvailability, deleteUserDomain, getUserDomain, updateUserDomain, updateHeartbeat, checkOnlineStatus, getDomain, updateLastRouteRegistration, getAllUserDomains} from "./Domain.js";
+import {getServerDomain, getInactiveDomainDays} from "../configuration/config.js";
+import {registerRoutes, getRoutes, deleteRoutes, Route, getRoutesTTL, getActiveUserIds, getActivityTimestamp} from "./Routes.js";
 import {getCACertificate, signCSR, isCAInitialized} from "./CertificateAuthority.js";
+import {logDomainAssigned} from "./DomainLogger.js";
+import {runCleanup} from "./DomainCleanup.js";
 
 /**
  * Logs authentication failures with relevant context for security monitoring.
@@ -140,6 +142,12 @@ export function routerAPI(expressApp: express.Application) {
         serverDomain,
         publicKey
       });
+
+      // Log domain assignment if a new domain name was set
+      if (domainName) {
+        logDomainAssigned(domainName, req.user.uid);
+      }
+
       return res.status(200).json({ message: "Domain information updated successfully." });
     } catch (error) {
       console.error("Error in POST /domain", error);
@@ -301,6 +309,9 @@ export function routerAPI(expressApp: express.Application) {
 
       await registerRoutes(userid, validatedRoutes);
 
+      // Update lastRouteRegistration in Firestore
+      await updateLastRouteRegistration(userid);
+
       console.log('Routes registered', { userid, routeCount: validatedRoutes.length });
 
       return res.status(200).json({
@@ -417,6 +428,112 @@ export function routerAPI(expressApp: express.Application) {
       });
     } catch (error) {
       console.error("Error in GET /resolve/v2/:domain", error);
+      return res.status(500).json({ error: error.toString() });
+    }
+  });
+
+  // ============================================================================
+  // Domain Activity API
+  // ============================================================================
+
+  /**
+   * GET /domains/active
+   * List all active domains (domains with route activity within INACTIVE_DOMAIN_DAYS).
+   * Returns domain info including lastRouteRegistration timestamp.
+   */
+  router.get('/domains/active', async (req, res) => {
+    try {
+      const inactiveDays = getInactiveDomainDays();
+
+      // Get active user IDs from Redis
+      const activeUserIds = await getActiveUserIds(inactiveDays);
+
+      // Fetch domain info from Firestore for each active user
+      const domains: Array<{
+        userId: string;
+        domainName: string;
+        lastRouteRegistration: string | null;
+      }> = [];
+
+      for (const userId of activeUserIds) {
+        try {
+          const userData = await getUserDomain(userId);
+          if (userData && userData.domainName) {
+            // Get activity timestamp from Redis for accurate lastRouteRegistration
+            const activityTs = await getActivityTimestamp(userId);
+            domains.push({
+              userId,
+              domainName: userData.domainName,
+              lastRouteRegistration: activityTs ? new Date(activityTs).toISOString() : userData.lastRouteRegistration || null,
+            });
+          }
+        } catch (error) {
+          console.error(`Error fetching domain for user ${userId}:`, error);
+          // Continue with other users
+        }
+      }
+
+      return res.status(200).json({
+        domains,
+        count: domains.length,
+        inactiveDays,
+      });
+    } catch (error) {
+      console.error("Error in GET /domains/active", error);
+      return res.status(500).json({ error: error.toString() });
+    }
+  });
+
+  // ============================================================================
+  // Admin API - Manual operations (for testing/maintenance)
+  // Requires SERVICE_API_KEY authentication: Bearer SERVICE_API_KEY;admin
+  // ============================================================================
+
+  /**
+   * POST /admin/cleanup
+   * Manually trigger domain cleanup.
+   * Useful for testing the cleanup logic without waiting for cron.
+   *
+   * Auth: Bearer SERVICE_API_KEY;admin (or any uid)
+   *
+   * Query params:
+   *   - dryRun=true: Only report what would be cleaned, don't actually clean
+   */
+  router.post('/admin/cleanup', authenticate, async (req: AuthUserRequest, res) => {
+    try {
+      const dryRun = req.query.dryRun === 'true';
+
+      if (dryRun) {
+        // Import inline to avoid circular deps for dry run
+        const { getInactiveUserIds } = await import("./Routes.js");
+        const inactiveDays = getInactiveDomainDays();
+        const inactiveUserIds = await getInactiveUserIds(inactiveDays);
+
+        const wouldRelease: Array<{ userId: string; domainName: string }> = [];
+        for (const userId of inactiveUserIds) {
+          const userData = await getUserDomain(userId);
+          if (userData?.domainName) {
+            wouldRelease.push({ userId, domainName: userData.domainName });
+          }
+        }
+
+        return res.status(200).json({
+          dryRun: true,
+          wouldRelease,
+          count: wouldRelease.length,
+          inactiveDays,
+        });
+      }
+
+      console.log('Manual cleanup triggered via admin endpoint');
+      const result = await runCleanup();
+
+      return res.status(200).json({
+        message: "Cleanup completed",
+        ...result,
+      });
+    } catch (error) {
+      console.error("Error in POST /admin/cleanup", error);
       return res.status(500).json({ error: error.toString() });
     }
   });

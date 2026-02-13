@@ -10,6 +10,9 @@ export interface NSLRouterData {
     // Heartbeat / online status
     lastSeenOnline?: string;
 
+    // Last route registration timestamp (ISO format) - updated on POST /routes
+    lastRouteRegistration?: string;
+
     //meta
     id?: string;
     createdate?: string;

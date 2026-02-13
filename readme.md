@@ -30,6 +30,13 @@ Express.js API for Mesh Router domain management and route resolution. Handles u
 | POST | `/heartbeat/:userid/:sig` | Ed25519 Signature | Update online status |
 | GET | `/status/:userid` | Public | Check if user is online |
 
+### Domain Activity & Cleanup
+
+| Method | Endpoint | Auth | Description |
+|--------|----------|------|-------------|
+| GET | `/domains/active` | Public | List all active domains (with recent route activity) |
+| POST | `/admin/cleanup` | SERVICE_API_KEY | Manually trigger inactive domain cleanup |
+
 ### Certificate Authority (Private PKI)
 
 | Method | Endpoint | Auth | Description |
@@ -80,6 +87,9 @@ pnpm install
 | `CA_CERT_PATH` | No | Path to CA certificate for PKI (default: `config/ca-cert.pem`) |
 | `CA_KEY_PATH` | No | Path to CA private key for PKI (default: `config/ca-key.pem`) |
 | `CERT_VALIDITY_HOURS` | No | Certificate validity in hours (default: 72) |
+| `INACTIVE_DOMAIN_DAYS` | No | Days of inactivity before domain cleanup (default: 30) |
+| `DOMAIN_LOG_PATH` | No | Path for domain event audit log (default: `logs/domain-events.log`) |
+| `CLEANUP_CRON_SCHEDULE` | No | Cron schedule for cleanup job (default: `0 3 * * *` - 3 AM daily) |
 
 **Service Account** (required):
 - Path: `./config/serviceAccount.json`
@@ -137,6 +147,9 @@ src/
 │   ├── RouterAPI.ts            # API endpoint definitions
 │   ├── Domain.ts               # Domain business logic
 │   ├── Routes.ts               # Redis-backed route management
+│   ├── DomainCleanup.ts        # Inactive domain cleanup logic
+│   ├── DomainLogger.ts         # Domain event audit logging
+│   ├── CertificateAuthority.ts # Private PKI certificate signing
 │   └── ExpressAuthenticateMiddleWare.ts
 ├── firebase/
 │   └── firebaseIntegration.ts  # Firebase Admin SDK setup
@@ -159,6 +172,24 @@ Routes are stored in Redis with automatic TTL expiration:
 - Agents refresh their routes every ~300 seconds (implicit heartbeat)
 - Routes are merged by `ip:port` key, allowing multiple sources (agent + tunnel)
 - `/resolve/v2/:domain` returns `routesTtl` showing seconds until expiration
+
+## Domain Activity Tracking & Cleanup
+
+The system tracks domain activity and automatically cleans up inactive domains:
+
+- **Activity Tracking**: When routes are registered (`POST /routes`), the user's activity is recorded in Redis (sorted set `domains:activity`) with a timestamp.
+- **Active Domains**: `GET /domains/active` returns domains with activity within `INACTIVE_DOMAIN_DAYS` (default: 30 days).
+- **Automatic Cleanup**: A cron job runs on `CLEANUP_CRON_SCHEDULE` (default: 3 AM daily) to release inactive domains.
+- **Manual Cleanup**: `POST /admin/cleanup` triggers cleanup manually (requires `SERVICE_API_KEY` auth).
+- **Audit Log**: Domain assignments and releases are logged to `DOMAIN_LOG_PATH`.
+
+**Cleanup Process:**
+1. Finds users with no route activity for > `INACTIVE_DOMAIN_DAYS`
+2. Clears their `domainName` and `publicKey` in Firestore (releases the domain)
+3. Removes them from Redis activity tracking
+4. Logs the release event
+
+**Manual Testing:** See [test/MANUAL_TEST.md](./test/MANUAL_TEST.md) for testing instructions.
 
 ## Domain Configuration
 

@@ -161,6 +161,57 @@ export async function deleteUserDomain(userId: string): Promise<void> {
 }
 
 /**
+ * Updates the lastRouteRegistration timestamp for a user.
+ * Called when routes are registered via POST /routes.
+ * @param userId - The user ID
+ * @returns The updated timestamp
+ */
+export async function updateLastRouteRegistration(userId: string): Promise<string> {
+  if (!userId) {
+    throw new Error("User ID is required.");
+  }
+
+  const lastRouteRegistration = new Date().toISOString();
+  const userDocRef = admin.firestore().collection(NSL_ROUTER_COLLECTION).doc(userId);
+  await userDocRef.update({ lastRouteRegistration });
+
+  return lastRouteRegistration;
+}
+
+/**
+ * Clears domain assignment fields (domainName, publicKey) for a user.
+ * Used during domain cleanup to release inactive domains.
+ * Keeps the user document but removes domain assignment.
+ * @param userId - The user ID
+ */
+export async function clearDomainAssignment(userId: string): Promise<void> {
+  if (!userId) {
+    throw new Error("User ID is required.");
+  }
+
+  const userDocRef = admin.firestore().collection(NSL_ROUTER_COLLECTION).doc(userId);
+  await userDocRef.update({
+    domainName: admin.firestore.FieldValue.delete(),
+    publicKey: admin.firestore.FieldValue.delete(),
+  });
+}
+
+/**
+ * Gets all user domains from Firestore.
+ * Used for listing active domains.
+ * @returns Array of user documents with their IDs
+ */
+export async function getAllUserDomains(): Promise<Array<{ userId: string; data: NSLRouterData }>> {
+  const snapshot = await admin.firestore().collection(NSL_ROUTER_COLLECTION).get();
+  return snapshot.docs
+    .filter(doc => doc.data().domainName) // Only return docs with a domain
+    .map(doc => ({
+      userId: doc.id,
+      data: doc.data() as NSLRouterData,
+    }));
+}
+
+/**
  * Validates an IPv4 address.
  * @param ip - The IP address to validate
  * @returns true if valid IPv4, false otherwise

@@ -1,5 +1,11 @@
 import { getRedisClient } from "../redis/redisClient.js";
-import { getRoutesTtl } from "../configuration/config.js";
+import { getRoutesTtl, getInactiveDomainDays } from "../configuration/config.js";
+
+/**
+ * Redis key for domain activity tracking sorted set.
+ * Stores userId -> timestamp (score) mapping for fast activity queries.
+ */
+const ACTIVITY_KEY = "domains:activity";
 
 /**
  * Health check configuration for a route.
@@ -101,6 +107,9 @@ export async function registerRoutes(userId: string, routes: Route[]): Promise<v
   const value = JSON.stringify(mergedRoutes);
 
   await redis.setex(key, getRoutesTtl(), value);
+
+  // Update activity tracking in Redis
+  await updateActivityTracking(userId);
 }
 
 /**
@@ -178,4 +187,83 @@ export async function getRoutesTTL(userId: string): Promise<number> {
   const key = getRoutesKey(userId);
 
   return redis.ttl(key);
+}
+
+// ============================================================================
+// Domain Activity Tracking
+// ============================================================================
+
+/**
+ * Update activity tracking for a user.
+ * Called when routes are registered to track the last activity time.
+ *
+ * @param userId - The user ID
+ */
+export async function updateActivityTracking(userId: string): Promise<void> {
+  if (!userId) {
+    throw new Error("User ID is required.");
+  }
+
+  const redis = getRedisClient();
+  await redis.zadd(ACTIVITY_KEY, Date.now(), userId);
+}
+
+/**
+ * Get user IDs that have been active within the specified number of days.
+ *
+ * @param inactiveDays - Number of days to consider active (default: from config)
+ * @returns Array of user IDs that are active
+ */
+export async function getActiveUserIds(inactiveDays?: number): Promise<string[]> {
+  const days = inactiveDays ?? getInactiveDomainDays();
+  const threshold = Date.now() - (days * 24 * 60 * 60 * 1000);
+
+  const redis = getRedisClient();
+  return redis.zrangebyscore(ACTIVITY_KEY, threshold, '+inf');
+}
+
+/**
+ * Get user IDs that have been inactive for more than the specified number of days.
+ *
+ * @param inactiveDays - Number of days of inactivity (default: from config)
+ * @returns Array of user IDs that are inactive
+ */
+export async function getInactiveUserIds(inactiveDays?: number): Promise<string[]> {
+  const days = inactiveDays ?? getInactiveDomainDays();
+  const threshold = Date.now() - (days * 24 * 60 * 60 * 1000);
+
+  const redis = getRedisClient();
+  return redis.zrangebyscore(ACTIVITY_KEY, 0, threshold);
+}
+
+/**
+ * Remove a user from activity tracking.
+ * Called during domain cleanup.
+ *
+ * @param userId - The user ID to remove
+ */
+export async function removeFromActivityTracking(userId: string): Promise<void> {
+  if (!userId) {
+    throw new Error("User ID is required.");
+  }
+
+  const redis = getRedisClient();
+  await redis.zrem(ACTIVITY_KEY, userId);
+}
+
+/**
+ * Get the last activity timestamp for a user.
+ *
+ * @param userId - The user ID
+ * @returns Timestamp in milliseconds, or null if not found
+ */
+export async function getActivityTimestamp(userId: string): Promise<number | null> {
+  if (!userId) {
+    throw new Error("User ID is required.");
+  }
+
+  const redis = getRedisClient();
+  const score = await redis.zscore(ACTIVITY_KEY, userId);
+
+  return score !== null ? parseInt(score, 10) : null;
 }
