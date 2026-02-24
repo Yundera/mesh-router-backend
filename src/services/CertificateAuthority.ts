@@ -216,7 +216,7 @@ export async function signCSR(
   cert.setIssuer(caCert.subject.attributes);
 
   // Build extensions for end-entity certificate
-  const extensions: forge.pki.CertificateExtension[] = [
+  const extensions: Parameters<typeof cert.setExtensions>[0] = [
     {
       name: 'basicConstraints',
       cA: false,
