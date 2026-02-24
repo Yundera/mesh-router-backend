@@ -236,9 +236,9 @@ export async function signCSR(
     },
     {
       name: 'authorityKeyIdentifier',
-      keyIdentifier: true,
-      authorityCertIssuer: true,
-      serialNumber: true,
+      // Pass the issuer certificate to correctly derive the authority key identifier
+      // from the CA's public key (not the subject's key)
+      issuer: caCert,
     },
   ];
 
