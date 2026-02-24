@@ -42,7 +42,7 @@ Express.js API for Mesh Router domain management and route resolution. Handles u
 | Method | Endpoint | Auth | Description |
 |--------|----------|------|-------------|
 | GET | `/ca-cert` | Public | Get CA public certificate (PEM format) |
-| POST | `/cert/:userid/:sig` | Ed25519 Signature | Sign a CSR and get certificate |
+| POST | `/cert/:userid/:sig` | Ed25519 Signature | Sign a CSR and get certificate (with optional nip.io SAN) |
 
 ### Example Usage
 
@@ -64,6 +64,17 @@ curl -X POST http://localhost:8192/routes/{userid}/{signature} \
 # Verify domain ownership
 curl http://localhost:8192/verify/{userid}/{signature}
 # Response: {"serverDomain":"nsl.sh","domainName":"myname"}
+
+# Get CA certificate (for Cloudflare COTS or client trust)
+curl http://localhost:8192/ca-cert
+# Response: -----BEGIN CERTIFICATE-----\n...(PEM format)
+
+# Request certificate with nip.io SAN (for HTTPS via Cloudflare Workers)
+curl -X POST http://localhost:8192/cert/{userid}/{signature} \
+  -H "Content-Type: application/json" \
+  -d '{"csr": "-----BEGIN CERTIFICATE REQUEST-----\n...", "publicIp": "2001:bc8:3021::1"}'
+# Response: {"certificate":"-----BEGIN CERTIFICATE-----\n...","expiresAt":"2026-01-30T12:00:00.000Z","caCertificate":"..."}
+# Certificate will include SAN: 2001-bc8-3021--1.nip.io
 ```
 
 ## Getting Started

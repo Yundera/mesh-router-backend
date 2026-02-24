@@ -159,11 +159,13 @@ export function getCACertificate(): string {
  *
  * @param csrPem - The CSR in PEM format
  * @param userId - The expected user ID (must match CN in CSR)
+ * @param publicIp - Optional public IP to include as SAN (for nip.io support)
  * @returns Signed certificate and expiry date
  */
 export async function signCSR(
   csrPem: string,
-  userId: string
+  userId: string,
+  publicIp?: string
 ): Promise<{ certificate: string; expiresAt: Date }> {
   if (!caCert || !caKey) {
     throw new Error('Certificate Authority not initialized');
@@ -213,8 +215,8 @@ export async function signCSR(
   // Set issuer from CA certificate
   cert.setIssuer(caCert.subject.attributes);
 
-  // Set extensions for end-entity certificate
-  cert.setExtensions([
+  // Build extensions for end-entity certificate
+  const extensions: forge.pki.CertificateExtension[] = [
     {
       name: 'basicConstraints',
       cA: false,
@@ -238,7 +240,29 @@ export async function signCSR(
       authorityCertIssuer: true,
       serialNumber: true,
     },
-  ]);
+  ];
+
+  // Add Subject Alternative Names (SAN) for nip.io support
+  // This allows HTTPS connections via nip.io hostnames (e.g., from Cloudflare Workers)
+  if (publicIp) {
+    // Convert IP to nip.io hostname format
+    // IPv4: 192.168.1.1 -> 192.168.1.1.nip.io
+    // IPv6: 2001:bc8:3021::1 -> 2001-bc8-3021--1.nip.io
+    const nipHost = publicIp.includes(':')
+      ? `${publicIp.replace(/:/g, '-')}.nip.io`
+      : `${publicIp}.nip.io`;
+
+    extensions.push({
+      name: 'subjectAltName',
+      altNames: [
+        { type: 2, value: nipHost },  // DNS name (nip.io hostname)
+      ],
+    });
+
+    console.log(`[CA]   SAN: ${nipHost}`);
+  }
+
+  cert.setExtensions(extensions);
 
   // Sign with CA private key
   cert.sign(caKey, forge.md.sha256.create());

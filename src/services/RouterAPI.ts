@@ -566,7 +566,11 @@ export function routerAPI(expressApp: express.Application) {
    * POST /cert/:userid/:sig
    * Issues a signed certificate for the user.
    *
-   * Request body: { csr: "-----BEGIN CERTIFICATE REQUEST-----\n..." }
+   * Request body:
+   * {
+   *   csr: "-----BEGIN CERTIFICATE REQUEST-----\n...",
+   *   publicIp?: "192.168.1.1"  // Optional: adds nip.io hostname to certificate SAN
+   * }
    *
    * Response:
    * {
@@ -577,10 +581,14 @@ export function routerAPI(expressApp: express.Application) {
    *
    * The signature must be a valid Ed25519 signature of the userid.
    * The CSR Common Name (CN) must match the userid.
+   *
+   * If publicIp is provided, the certificate will include a Subject Alternative Name (SAN)
+   * for the nip.io hostname (e.g., 192.168.1.1.nip.io). This enables HTTPS connections
+   * from Cloudflare Workers which cannot fetch raw IP addresses.
    */
   router.post('/cert/:userid/:sig', async (req, res) => {
     const { userid, sig } = req.params;
-    const { csr } = req.body;
+    const { csr, publicIp } = req.body;
 
     try {
       if (!isCAInitialized()) {
@@ -611,11 +619,11 @@ export function routerAPI(expressApp: express.Application) {
         return res.status(401).json({ error: "Invalid signature." });
       }
 
-      // Sign the CSR
-      const { certificate, expiresAt } = await signCSR(csr, userid);
+      // Sign the CSR (with optional nip.io SAN)
+      const { certificate, expiresAt } = await signCSR(csr, userid, publicIp);
       const caCertificate = getCACertificate();
 
-      console.log('Certificate issued', { userid, expiresAt: expiresAt.toISOString() });
+      console.log('Certificate issued', { userid, expiresAt: expiresAt.toISOString(), publicIp: publicIp || 'none' });
 
       return res.status(200).json({
         certificate,
