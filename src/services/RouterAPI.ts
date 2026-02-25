@@ -288,6 +288,10 @@ export function routerAPI(expressApp: express.Application) {
         if (!r.source || typeof r.source !== 'string') {
           throw new Error(`Route ${index}: source is required.`);
         }
+        // Validate scheme if provided
+        if (r.scheme && r.scheme !== 'http' && r.scheme !== 'https') {
+          throw new Error(`Route ${index}: scheme must be "http" or "https".`);
+        }
 
         const route: Route = {
           ip: r.ip,
@@ -295,6 +299,11 @@ export function routerAPI(expressApp: express.Application) {
           priority: r.priority,
           source: r.source,
         };
+
+        // Add scheme if provided (defaults to "https" for backward compat)
+        if (r.scheme) {
+          route.scheme = r.scheme;
+        }
 
         // Add health check if provided
         if (r.healthCheck && r.healthCheck.path) {

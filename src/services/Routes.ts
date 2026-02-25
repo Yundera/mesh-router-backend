@@ -22,6 +22,7 @@ export interface Route {
   ip: string;                      // IP address of the route endpoint
   port: number;                    // Port number
   priority: number;                // Lower number = higher priority (1 = direct, 2 = tunnel)
+  scheme?: "http" | "https";       // Protocol scheme (default: "https" for backward compat)
   healthCheck?: RouteHealthCheck;  // Optional health check configuration
   source: string;                  // Source identifier (e.g., "agent", "tunnel") - routes from same source replace each other
 }
