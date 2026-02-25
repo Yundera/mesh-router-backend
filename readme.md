@@ -204,7 +204,7 @@ The system tracks domain activity and automatically cleans up inactive domains:
 
 ## Domain Configuration
 
-The `serverDomain` returned by all API endpoints comes from the `SERVER_DOMAIN` environment variable, not from the database. This allows the same backend to serve different domains (e.g., `nsl.sh` for production, `inojob.com` for staging) without database changes.
+The `serverDomain` returned by all API endpoints comes from the `SERVER_DOMAIN` environment variable, not from the database. This allows the same backend to serve different domains (e.g., `nsl.sh` for production, `domain.com` for staging) without database changes.
 
 The `serverDomain` field stored in Firestore is informational/audit only - it records what the client originally sent but is not used in API responses.
 
