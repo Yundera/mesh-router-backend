@@ -35,10 +35,12 @@ function getRoutesKey(userId: string): string {
 }
 
 /**
- * Generate a unique key for a route based on ip:port.
+ * Generate a unique key for a route based on ip:port:scheme.
+ * The scheme is included to allow separate routes for http/https on the same ip:port.
  */
 function getRouteKey(route: Route): string {
-  return `${route.ip}:${route.port}`;
+  const scheme = route.scheme || 'https';
+  return `${route.ip}:${route.port}:${scheme}`;
 }
 
 /**
