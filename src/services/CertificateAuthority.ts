@@ -14,6 +14,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { fileURLToPath } from 'url';
 import forge from 'node-forge';
+import { getServerDomain } from '../configuration/config.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -242,24 +243,39 @@ export async function signCSR(
     },
   ];
 
-  // Add Subject Alternative Names (SAN) for nip.io support
-  // This allows HTTPS connections via nip.io hostnames (e.g., from Cloudflare Workers)
-  if (publicIp) {
-    // Convert IP to nip.io hostname format
-    // IPv4: 192.168.1.1 -> 192.168.1.1.nip.io
-    // IPv6: 2001:bc8:3021::1 -> 2001-bc8-3021--1.nip.io
-    const nipHost = publicIp.includes(':')
-      ? `${publicIp.replace(/:/g, '-')}.nip.io`
-      : `${publicIp}.nip.io`;
+  // Build comprehensive SANs for all access patterns
+  // This enables HTTPS connections via:
+  // 1. Gateway-routed traffic (SNI matching *.serverDomain)
+  // 2. CF Worker direct access (*.nip.io)
+  // 3. Direct IP access (https://[IP])
+  const altNames: Array<{type: number; value?: string; ip?: string}> = [];
 
+  // 1. Wildcard for serverDomain (gateway-routed traffic)
+  // e.g., *.inojob.com matches casaos-wisera.inojob.com
+  try {
+    const serverDomain = getServerDomain();
+    altNames.push({ type: 2, value: `*.${serverDomain}` });  // DNS wildcard
+    console.log(`[CA]   SAN: *.${serverDomain}`);
+  } catch (e) {
+    console.log('[CA]   Warning: SERVER_DOMAIN not configured, skipping wildcard SAN');
+  }
+
+  // 2. Wildcard for nip.io (CF Worker direct access)
+  // Covers any {something}.nip.io hostname
+  altNames.push({ type: 2, value: '*.nip.io' });  // DNS wildcard
+  console.log('[CA]   SAN: *.nip.io');
+
+  // 3. Raw IP SAN (direct IP access via https://[IP])
+  if (publicIp) {
+    altNames.push({ type: 7, ip: publicIp });  // IP address
+    console.log(`[CA]   SAN: IP ${publicIp}`);
+  }
+
+  if (altNames.length > 0) {
     extensions.push({
       name: 'subjectAltName',
-      altNames: [
-        { type: 2, value: nipHost },  // DNS name (nip.io hostname)
-      ],
+      altNames,
     });
-
-    console.log(`[CA]   SAN: ${nipHost}`);
   }
 
   cert.setExtensions(extensions);
