@@ -251,59 +251,6 @@ describe("Routes v2 API", () => {
       expect(storedRoutes).to.have.lengthOf(2);
     });
 
-    it("should register route with health check", async () => {
-      const signature = await signMessage(testKeys.privateKey, testUserId);
-      const routes = [
-        {
-          ip: "10.77.0.100",
-          port: 443,
-          priority: 1,
-          source: "agent",
-          healthCheck: {
-            path: "/.well-known/health",
-            host: "alice.nsl.sh"
-          }
-        }
-      ];
-
-      const response = await request(app)
-        .post(`/routes/${testUserId}/${signature}`)
-        .send({ routes })
-        .expect(200);
-
-      expect(response.body.routes[0].healthCheck).to.deep.equal({
-        path: "/.well-known/health",
-        host: "alice.nsl.sh"
-      });
-
-      const storedRoutes = await getTestUserRoutes(testUserId);
-      expect(storedRoutes![0].healthCheck?.path).to.equal("/.well-known/health");
-      expect(storedRoutes![0].healthCheck?.host).to.equal("alice.nsl.sh");
-    });
-
-    it("should register route with health check path only (no host)", async () => {
-      const signature = await signMessage(testKeys.privateKey, testUserId);
-      const routes = [
-        {
-          ip: "10.77.0.100",
-          port: 443,
-          priority: 1,
-          source: "agent",
-          healthCheck: {
-            path: "/health"
-          }
-        }
-      ];
-
-      const response = await request(app)
-        .post(`/routes/${testUserId}/${signature}`)
-        .send({ routes })
-        .expect(200);
-
-      expect(response.body.routes[0].healthCheck.path).to.equal("/health");
-      expect(response.body.routes[0].healthCheck.host).to.be.undefined;
-    });
-
     it("should update existing route with same ip:port (refresh TTL)", async () => {
       const signature = await signMessage(testKeys.privateKey, testUserId);
 

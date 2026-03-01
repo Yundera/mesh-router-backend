@@ -8,22 +8,14 @@ import { getRoutesTtl, getInactiveDomainDays } from "../configuration/config.js"
 const ACTIVITY_KEY = "domains:activity";
 
 /**
- * Health check configuration for a route.
- */
-export interface RouteHealthCheck {
-  path: string;        // HTTP path to probe (e.g., "/.well-known/health")
-  host?: string;       // Optional Host header override (defaults to user's domain)
-}
-
-/**
  * A single route entry for reaching a PCS.
  */
 export interface Route {
   ip: string;                      // IP address of the route endpoint
   port: number;                    // Port number
   priority: number;                // Lower number = higher priority (1 = direct, 2 = tunnel)
-  scheme?: "http" | "https";       // Protocol scheme (default: "https" for backward compat)
-  healthCheck?: RouteHealthCheck;  // Optional health check configuration
+  scheme?: "http" | "https";       // Ingress protocol scheme - what traffic this route accepts (default: "https")
+  targetScheme?: "http" | "https"; // Target protocol scheme - what protocol to use when connecting to backend (default: scheme)
   source: string;                  // Source identifier (e.g., "agent", "tunnel") - routes from same source replace each other
   type?: "ip" | "domain";          // Route type: "ip" for direct IP, "domain" for pre-validated domain routes (default: "ip")
   domain?: string;                 // Domain hostname (required when type="domain", e.g., "88-187-147-189.sslip.io")

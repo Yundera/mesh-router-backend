@@ -42,8 +42,9 @@ export async function validateRoute(route: Route): Promise<ValidationResult> {
     : route.ip;
 
   const startTime = Date.now();
-  const scheme = route.scheme || 'https';
-  const url = `${scheme}://${targetHost}:${route.port}/`;
+  // Use targetScheme for backend connection, fallback to ingress scheme
+  const targetScheme = route.targetScheme || route.scheme || 'https';
+  const url = `${targetScheme}://${targetHost}:${route.port}/`;
 
   try {
     const controller = new AbortController();

@@ -238,11 +238,14 @@ export function routerAPI(expressApp: express.Application) {
    * Register or update routes for a user.
    * Routes are stored in Redis with a TTL (refreshed on each call).
    *
-   * Body: { routes: [{ ip, port, priority, healthCheck? }] }
+   * Body: { routes: [{ ip, port, priority, source, scheme?, type?, domain? }] }
    *   - ip: string - IP address of the route endpoint
    *   - port: number - Port number (1-65535)
    *   - priority: number - Lower = higher priority (1 = direct, 2 = tunnel)
-   *   - healthCheck: { path: string, host?: string } - Optional health check config
+   *   - source: string - Source identifier (e.g., "agent", "tunnel")
+   *   - scheme: "http" | "https" - Protocol scheme (optional, default: "https")
+   *   - type: "ip" | "domain" - Route type (optional, default: "ip")
+   *   - domain: string - Domain hostname (required when type="domain")
    *
    * The signature must be a valid Ed25519 signature of the userid.
    */
@@ -293,6 +296,10 @@ export function routerAPI(expressApp: express.Application) {
         if (r.scheme && r.scheme !== 'http' && r.scheme !== 'https') {
           throw new Error(`Route ${index}: scheme must be "http" or "https".`);
         }
+        // Validate targetScheme if provided
+        if (r.targetScheme && r.targetScheme !== 'http' && r.targetScheme !== 'https') {
+          throw new Error(`Route ${index}: targetScheme must be "http" or "https".`);
+        }
         // Validate type if provided
         if (r.type && r.type !== 'ip' && r.type !== 'domain') {
           throw new Error(`Route ${index}: type must be "ip" or "domain".`);
@@ -314,6 +321,11 @@ export function routerAPI(expressApp: express.Application) {
           route.scheme = r.scheme;
         }
 
+        // Add targetScheme if provided (defaults to scheme for backward compat)
+        if (r.targetScheme) {
+          route.targetScheme = r.targetScheme;
+        }
+
         // Add type if provided (defaults to "ip" for backward compat)
         if (r.type) {
           route.type = r.type;
@@ -322,14 +334,6 @@ export function routerAPI(expressApp: express.Application) {
         // Add domain if provided
         if (r.domain) {
           route.domain = r.domain;
-        }
-
-        // Add health check if provided
-        if (r.healthCheck && r.healthCheck.path) {
-          route.healthCheck = {
-            path: r.healthCheck.path,
-            ...(r.healthCheck.host && { host: r.healthCheck.host }),
-          };
         }
 
         return route;
