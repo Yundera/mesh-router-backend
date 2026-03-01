@@ -30,28 +30,30 @@ export interface Route {
 }
 
 /**
- * Get the Redis key for a user's routes.
+ * In-memory set of known route sources.
+ * Populated as sources register - avoids expensive Redis KEYS scans.
+ * Self-repopulates after restart as sources re-register (every 5 min).
  */
-function getRoutesKey(userId: string): string {
-  return `routes:${userId}`;
+const knownSources = new Set<string>();
+
+/**
+ * Get the Redis key for a specific source's routes.
+ */
+function getSourceRoutesKey(userId: string, source: string): string {
+  return `routes:${userId}:${source}`;
 }
 
 /**
- * Generate a unique key for a route based on ip:port:scheme:type:domain.
- * The scheme is included to allow separate routes for http/https on the same ip:port.
- * The type and domain are included to differentiate between IP and domain routes.
+ * Get all source keys for a user based on known sources.
  */
-function getRouteKey(route: Route): string {
-  const scheme = route.scheme || 'https';
-  const type = route.type || 'ip';
-  const domain = route.domain || '';
-  return `${route.ip}:${route.port}:${scheme}:${type}:${domain}`;
+function getAllSourceKeys(userId: string): string[] {
+  return Array.from(knownSources).map(s => getSourceRoutesKey(userId, s));
 }
 
 /**
  * Register or update routes for a user.
- * Merges new routes with existing routes based on ip:port as unique identifier.
- * This allows multiple sources (agent, tunnel) to register routes independently.
+ * Routes are stored in separate Redis keys per source, each with independent TTL.
+ * This prevents one source from refreshing another source's TTL.
  *
  * @param userId - The user ID
  * @param routes - Array of routes to register/update
@@ -76,45 +78,30 @@ export async function registerRoutes(userId: string, routes: Route[]): Promise<v
     if (typeof route.priority !== "number") {
       throw new Error("Route priority is required.");
     }
-  }
-
-  const redis = getRedisClient();
-  const key = getRoutesKey(userId);
-
-  // Get existing routes to merge with
-  const existingValue = await redis.get(key);
-  let existingRoutes: Route[] = [];
-
-  if (existingValue) {
-    try {
-      existingRoutes = JSON.parse(existingValue) as Route[];
-    } catch {
-      // Invalid data, start fresh
-      existingRoutes = [];
+    if (!route.source) {
+      throw new Error("Route source is required.");
     }
   }
 
-  // Filter out existing routes that have the same source as incoming routes
-  // This ensures routes from the same source replace each other entirely
-  const incomingSources = new Set(routes.map(r => r.source));
-  existingRoutes = existingRoutes.filter(r => !incomingSources.has(r.source));
-
-  // Create a map of existing routes by ip:port
-  const routeMap = new Map<string, Route>();
-  for (const route of existingRoutes) {
-    routeMap.set(getRouteKey(route), route);
-  }
-
-  // Merge/update with new routes
+  // Group routes by source and track known sources
+  const routesBySource = new Map<string, Route[]>();
   for (const route of routes) {
-    routeMap.set(getRouteKey(route), route);
+    knownSources.add(route.source);
+    const existing = routesBySource.get(route.source) || [];
+    existing.push(route);
+    routesBySource.set(route.source, existing);
   }
 
-  // Convert back to array
-  const mergedRoutes = Array.from(routeMap.values());
-  const value = JSON.stringify(mergedRoutes);
+  const redis = getRedisClient();
+  const pipeline = redis.pipeline();
 
-  await redis.setex(key, getRoutesTtl(), value);
+  // Write each source's routes to its own key with independent TTL
+  for (const [source, sourceRoutes] of routesBySource) {
+    const key = getSourceRoutesKey(userId, source);
+    pipeline.setex(key, getRoutesTtl(), JSON.stringify(sourceRoutes));
+  }
+
+  await pipeline.exec();
 
   // Update activity tracking in Redis
   await updateActivityTracking(userId);
@@ -122,6 +109,7 @@ export async function registerRoutes(userId: string, routes: Route[]): Promise<v
 
 /**
  * Get routes for a user.
+ * Merges routes from all source-specific keys.
  *
  * @param userId - The user ID
  * @returns Array of routes, or null if not found/expired
@@ -132,23 +120,33 @@ export async function getRoutes(userId: string): Promise<Route[] | null> {
   }
 
   const redis = getRedisClient();
-  const key = getRoutesKey(userId);
-  const value = await redis.get(key);
+  const keys = getAllSourceKeys(userId);
 
-  if (!value) {
+  if (keys.length === 0) {
     return null;
   }
 
-  try {
-    return JSON.parse(value) as Route[];
-  } catch {
-    console.error(`Invalid routes data for user ${userId}`);
-    return null;
+  // Use MGET for single round-trip
+  const values = await redis.mget(...keys);
+
+  const allRoutes: Route[] = [];
+  for (const value of values) {
+    if (value) {
+      try {
+        const routes = JSON.parse(value) as Route[];
+        allRoutes.push(...routes);
+      } catch {
+        // Skip invalid data
+      }
+    }
   }
+
+  return allRoutes.length > 0 ? allRoutes : null;
 }
 
 /**
  * Delete routes for a user.
+ * Deletes all source-specific keys.
  *
  * @param userId - The user ID
  */
@@ -158,12 +156,17 @@ export async function deleteRoutes(userId: string): Promise<void> {
   }
 
   const redis = getRedisClient();
-  const key = getRoutesKey(userId);
-  await redis.del(key);
+  const keys = getAllSourceKeys(userId);
+
+  // Delete all source keys (del ignores non-existent keys)
+  if (keys.length > 0) {
+    await redis.del(...keys);
+  }
 }
 
 /**
  * Check if a user has any routes registered.
+ * Checks all source-specific keys.
  *
  * @param userId - The user ID
  * @returns true if routes exist, false otherwise
@@ -174,17 +177,25 @@ export async function hasRoutes(userId: string): Promise<boolean> {
   }
 
   const redis = getRedisClient();
-  const key = getRoutesKey(userId);
-  const exists = await redis.exists(key);
+  const keys = getAllSourceKeys(userId);
 
-  return exists === 1;
+  // No known sources means no routes possible
+  if (keys.length === 0) {
+    return false;
+  }
+
+  // Check if any source key exists for this user
+  const exists = await redis.exists(...keys);
+
+  return exists > 0;
 }
 
 /**
  * Get the TTL (time to live) for a user's routes.
+ * Returns the minimum positive TTL across all source keys.
  *
  * @param userId - The user ID
- * @returns TTL in seconds, -1 if key exists but has no TTL, -2 if key doesn't exist
+ * @returns TTL in seconds, -2 if no keys exist
  */
 export async function getRoutesTTL(userId: string): Promise<number> {
   if (!userId) {
@@ -192,9 +203,32 @@ export async function getRoutesTTL(userId: string): Promise<number> {
   }
 
   const redis = getRedisClient();
-  const key = getRoutesKey(userId);
+  const keys = getAllSourceKeys(userId);
 
-  return redis.ttl(key);
+  // No known sources means no routes possible
+  if (keys.length === 0) {
+    return -2;
+  }
+
+  // Get TTL for all source keys
+  const pipeline = redis.pipeline();
+  for (const key of keys) {
+    pipeline.ttl(key);
+  }
+  const results = await pipeline.exec();
+
+  // Return minimum positive TTL, or -2 if no keys exist
+  let minTtl = -2;
+  for (const result of results || []) {
+    const [err, ttl] = result as [Error | null, number];
+    if (!err && typeof ttl === 'number' && ttl > 0) {
+      if (minTtl === -2 || ttl < minTtl) {
+        minTtl = ttl;
+      }
+    }
+  }
+
+  return minTtl;
 }
 
 // ============================================================================

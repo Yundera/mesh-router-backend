@@ -127,6 +127,15 @@ export async function getTestUserRoutesTTL(userId: string): Promise<number> {
 }
 
 /**
+ * Get TTL for a specific source's routes in Redis
+ * @returns TTL in seconds, -1 if no TTL, -2 if key doesn't exist
+ */
+export async function getTestUserSourceTTL(userId: string, source: string): Promise<number> {
+  const redis = getRedisClient();
+  return redis.ttl(`routes:${userId}:${source}`);
+}
+
+/**
  * Sleep for specified milliseconds
  */
 export function sleep(ms: number): Promise<void> {

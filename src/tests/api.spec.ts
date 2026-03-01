@@ -12,6 +12,7 @@ import {
   getTestUserRoutes,
   deleteTestUserRoutes,
   getTestUserRoutesTTL,
+  getTestUserSourceTTL,
   sleep,
   TEST_SERVER_DOMAIN,
 } from "./test-helpers.js";
@@ -751,6 +752,147 @@ describe("Routes TTL", () => {
       } else {
         this.skip();
       }
+    });
+  });
+
+  describe("Per-source TTL behavior", () => {
+    it("should store routes in separate keys per source", async () => {
+      const signature = await signMessage(testKeys.privateKey, testUserId);
+
+      // Register route from agent
+      await request(app)
+        .post(`/routes/${testUserId}/${signature}`)
+        .send({ routes: [{ ip: "1.1.1.1", port: 443, priority: 1, source: "agent" }] })
+        .expect(200);
+
+      // Register route from tunnel
+      await request(app)
+        .post(`/routes/${testUserId}/${signature}`)
+        .send({ routes: [{ ip: "10.77.0.1", port: 443, priority: 2, source: "tunnel" }] })
+        .expect(200);
+
+      // Each source should have its own TTL
+      const agentTtl = await getTestUserSourceTTL(testUserId, "agent");
+      const tunnelTtl = await getTestUserSourceTTL(testUserId, "tunnel");
+
+      expect(agentTtl).to.be.greaterThan(0);
+      expect(tunnelTtl).to.be.greaterThan(0);
+    });
+
+    it("should maintain independent TTLs for each source", async () => {
+      const signature = await signMessage(testKeys.privateKey, testUserId);
+
+      // Register route from agent
+      await request(app)
+        .post(`/routes/${testUserId}/${signature}`)
+        .send({ routes: [{ ip: "1.1.1.1", port: 443, priority: 1, source: "agent" }] })
+        .expect(200);
+
+      const agentTtlInitial = await getTestUserSourceTTL(testUserId, "agent");
+
+      // Wait a bit
+      await sleep(1100);
+
+      // Register route from tunnel (should NOT refresh agent's TTL)
+      await request(app)
+        .post(`/routes/${testUserId}/${signature}`)
+        .send({ routes: [{ ip: "10.77.0.1", port: 443, priority: 2, source: "tunnel" }] })
+        .expect(200);
+
+      const agentTtlAfter = await getTestUserSourceTTL(testUserId, "agent");
+      const tunnelTtl = await getTestUserSourceTTL(testUserId, "tunnel");
+
+      // Agent's TTL should have decreased (tunnel registration didn't refresh it)
+      expect(agentTtlAfter).to.be.lessThan(agentTtlInitial);
+
+      // Tunnel's TTL should be fresh (higher than agent's depleted TTL)
+      expect(tunnelTtl).to.be.greaterThan(agentTtlAfter);
+    });
+
+    it("should merge routes from all sources when reading", async () => {
+      const signature = await signMessage(testKeys.privateKey, testUserId);
+
+      // Register routes separately from each source
+      await request(app)
+        .post(`/routes/${testUserId}/${signature}`)
+        .send({ routes: [{ ip: "1.1.1.1", port: 443, priority: 1, source: "agent" }] })
+        .expect(200);
+
+      await request(app)
+        .post(`/routes/${testUserId}/${signature}`)
+        .send({ routes: [{ ip: "10.77.0.1", port: 443, priority: 2, source: "tunnel" }] })
+        .expect(200);
+
+      // Get routes should merge both
+      const routes = await getTestUserRoutes(testUserId);
+      expect(routes).to.have.lengthOf(2);
+
+      const agentRoute = routes!.find(r => r.source === "agent");
+      const tunnelRoute = routes!.find(r => r.source === "tunnel");
+
+      expect(agentRoute?.ip).to.equal("1.1.1.1");
+      expect(tunnelRoute?.ip).to.equal("10.77.0.1");
+    });
+
+    it("should return minimum TTL across all sources", async () => {
+      const signature = await signMessage(testKeys.privateKey, testUserId);
+
+      // Register route from agent
+      await request(app)
+        .post(`/routes/${testUserId}/${signature}`)
+        .send({ routes: [{ ip: "1.1.1.1", port: 443, priority: 1, source: "agent" }] })
+        .expect(200);
+
+      // Wait a bit so agent's TTL decreases
+      await sleep(1100);
+
+      // Register route from tunnel (fresh TTL)
+      await request(app)
+        .post(`/routes/${testUserId}/${signature}`)
+        .send({ routes: [{ ip: "10.77.0.1", port: 443, priority: 2, source: "tunnel" }] })
+        .expect(200);
+
+      const overallTtl = await getTestUserRoutesTTL(testUserId);
+      const agentTtl = await getTestUserSourceTTL(testUserId, "agent");
+      const tunnelTtl = await getTestUserSourceTTL(testUserId, "tunnel");
+
+      // Overall TTL should be the minimum (agent's depleted TTL)
+      expect(overallTtl).to.equal(agentTtl);
+      expect(overallTtl).to.be.lessThan(tunnelTtl);
+    });
+
+    it("should only refresh TTL for the source being registered", async () => {
+      const signature = await signMessage(testKeys.privateKey, testUserId);
+
+      // Register both sources
+      await request(app)
+        .post(`/routes/${testUserId}/${signature}`)
+        .send({ routes: [
+          { ip: "1.1.1.1", port: 443, priority: 1, source: "agent" },
+          { ip: "10.77.0.1", port: 443, priority: 2, source: "tunnel" }
+        ]})
+        .expect(200);
+
+      // Wait a bit
+      await sleep(1100);
+
+      const agentTtlBefore = await getTestUserSourceTTL(testUserId, "agent");
+      const tunnelTtlBefore = await getTestUserSourceTTL(testUserId, "tunnel");
+
+      // Only refresh agent
+      await request(app)
+        .post(`/routes/${testUserId}/${signature}`)
+        .send({ routes: [{ ip: "1.1.1.1", port: 443, priority: 1, source: "agent" }] })
+        .expect(200);
+
+      const agentTtlAfter = await getTestUserSourceTTL(testUserId, "agent");
+      const tunnelTtlAfter = await getTestUserSourceTTL(testUserId, "tunnel");
+
+      // Agent's TTL should be refreshed (higher than before or same)
+      expect(agentTtlAfter).to.be.at.least(agentTtlBefore);
+
+      // Tunnel's TTL should continue to decrease (not refreshed)
+      expect(tunnelTtlAfter).to.be.lessThan(tunnelTtlBefore);
     });
   });
 });

@@ -335,7 +335,7 @@ export function routerAPI(expressApp: express.Application) {
         return route;
       });
 
-      // Validate domain routes (IP routes are accepted without validation)
+      // Validate routes - all routes are validated for connectivity
       const { accepted, rejected } = await validateRoutes(validatedRoutes);
 
       if (accepted.length === 0) {
