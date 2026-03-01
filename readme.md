@@ -18,10 +18,41 @@ Express.js API for Mesh Router domain management and route resolution. Handles u
 
 | Method | Endpoint | Auth | Description |
 |--------|----------|------|-------------|
-| POST | `/routes/:userid/:sig` | Ed25519 Signature | Register routes for a user |
+| POST | `/routes/:userid/:sig` | Ed25519 Signature | Register routes (with validation) |
 | DELETE | `/routes/:userid/:sig` | Ed25519 Signature | Delete all routes for a user |
 | GET | `/routes/:userid` | Public | Get routes for a user |
 | GET | `/resolve/v2/:domain` | Public | Resolve domain to routes with TTL info |
+
+#### Route Types
+
+Routes have a `type` field that determines how they're used:
+
+| Type | Used By | Example |
+|------|---------|---------|
+| `ip` | OpenResty Gateway | `{type: "ip", ip: "88.187.147.189", port: 443}` |
+| `domain` | CF Worker | `{type: "domain", domain: "88-187-147-189.sslip.io", port: 443}` |
+
+#### Route Validation at Registration
+
+When routes are submitted via `POST /routes/:userid/:sig`, the backend validates each route before storing:
+
+1. **Connectivity Test**: Attempts to connect to the route (5 second timeout)
+2. **SSL Verification**: For HTTPS routes, verifies the certificate is valid
+3. **Only Healthy Routes Stored**: Routes that fail validation are rejected
+
+Response includes both accepted and rejected routes:
+```json
+{
+  "message": "Routes registered successfully.",
+  "accepted": [
+    {"type": "domain", "domain": "88-187-147-189.sslip.io", "port": 443}
+  ],
+  "rejected": [
+    {"type": "domain", "domain": "88-187-147-189.nip.io", "port": 443, "reason": "Connection timeout"}
+  ],
+  "domain": "myname.nsl.sh"
+}
+```
 
 ### Heartbeat & Status
 
@@ -55,11 +86,17 @@ curl http://localhost:8192/available/myname
 curl http://localhost:8192/resolve/v2/myname
 # Response: {"userId":"abc123","domainName":"myname","serverDomain":"nsl.sh","routes":[{"ip":"10.77.0.5","port":443,"priority":1}],"routesTtl":580,"lastSeenOnline":"2024-01-15T10:30:00Z"}
 
-# Register routes (requires Ed25519 signature of userid)
+# Register routes with validation (requires Ed25519 signature of userid)
 curl -X POST http://localhost:8192/routes/{userid}/{signature} \
   -H "Content-Type: application/json" \
-  -d '{"routes": [{"ip": "10.77.0.5", "port": 443, "priority": 1}]}'
-# Response: {"message":"Routes registered successfully.","routes":[...],"domain":"myname.nsl.sh"}
+  -d '{
+    "routes": [
+      {"type": "ip", "ip": "88.187.147.189", "port": 443, "priority": 1, "scheme": "https"},
+      {"type": "domain", "domain": "88-187-147-189.sslip.io", "port": 443, "priority": 2, "scheme": "https"},
+      {"type": "domain", "domain": "88-187-147-189.nip.io", "port": 443, "priority": 3, "scheme": "https"}
+    ]
+  }'
+# Response: {"message":"Routes registered successfully.","accepted":[...],"rejected":[...],"domain":"myname.nsl.sh"}
 
 # Verify domain ownership
 curl http://localhost:8192/verify/{userid}/{signature}
@@ -181,8 +218,27 @@ src/
 Routes are stored in Redis with automatic TTL expiration:
 - Routes expire after `ROUTES_TTL_SECONDS` (default: 600 seconds / 10 minutes)
 - Agents refresh their routes every ~300 seconds (implicit heartbeat)
-- Routes are merged by `ip:port` key, allowing multiple sources (agent + tunnel)
+- Routes are merged by `ip:port` or `domain:port` key, allowing multiple sources
 - `/resolve/v2/:domain` returns `routesTtl` showing seconds until expiration
+
+### Route Types
+
+| Type | Field | Used By | Example |
+|------|-------|---------|---------|
+| `ip` | `ip` | OpenResty Gateway | `88.187.147.189` |
+| `domain` | `domain` | CF Worker | `88-187-147-189.sslip.io` |
+
+CF Workers cannot fetch IP addresses directly (Cloudflare error 1003), so they use domain routes with wildcard DNS services (sslip.io, nip.io) that resolve to the embedded IP.
+
+### Route Validation
+
+Routes are validated at registration time:
+1. Backend tests connectivity to each route (5 second timeout)
+2. For HTTPS routes, SSL certificate is verified
+3. Only routes that pass validation are stored in Redis
+4. Agent receives feedback on which routes were accepted/rejected
+
+This ensures the CF Worker and Gateway only receive routes that are known to be reachable.
 
 ## Domain Activity Tracking & Cleanup
 

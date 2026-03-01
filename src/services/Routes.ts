@@ -25,6 +25,9 @@ export interface Route {
   scheme?: "http" | "https";       // Protocol scheme (default: "https" for backward compat)
   healthCheck?: RouteHealthCheck;  // Optional health check configuration
   source: string;                  // Source identifier (e.g., "agent", "tunnel") - routes from same source replace each other
+  type?: "ip" | "domain";          // Route type: "ip" for direct IP, "domain" for pre-validated domain routes (default: "ip")
+  domain?: string;                 // Domain hostname (required when type="domain", e.g., "88-187-147-189.sslip.io")
+  verify?: boolean;                // Whether to validate the route before storing (default: true)
 }
 
 /**
@@ -35,12 +38,15 @@ function getRoutesKey(userId: string): string {
 }
 
 /**
- * Generate a unique key for a route based on ip:port:scheme.
+ * Generate a unique key for a route based on ip:port:scheme:type:domain.
  * The scheme is included to allow separate routes for http/https on the same ip:port.
+ * The type and domain are included to differentiate between IP and domain routes.
  */
 function getRouteKey(route: Route): string {
   const scheme = route.scheme || 'https';
-  return `${route.ip}:${route.port}:${scheme}`;
+  const type = route.type || 'ip';
+  const domain = route.domain || '';
+  return `${route.ip}:${route.port}:${scheme}:${type}:${domain}`;
 }
 
 /**

@@ -4,6 +4,7 @@ import {authenticate, AuthUserRequest} from "./ExpressAuthenticateMiddleWare.js"
 import {checkDomainAvailability, deleteUserDomain, getUserDomain, updateUserDomain, updateHeartbeat, checkOnlineStatus, getDomain, updateLastRouteRegistration, getAllUserDomains} from "./Domain.js";
 import {getServerDomain, getInactiveDomainDays} from "../configuration/config.js";
 import {registerRoutes, getRoutes, deleteRoutes, Route, getRoutesTTL, getActiveUserIds, getActivityTimestamp} from "./Routes.js";
+import {validateRoutes} from "./RouteValidator.js";
 import {getCACertificate, signCSR, isCAInitialized} from "./CertificateAuthority.js";
 import {logDomainAssigned} from "./DomainLogger.js";
 import {runCleanup} from "./DomainCleanup.js";
@@ -292,6 +293,14 @@ export function routerAPI(expressApp: express.Application) {
         if (r.scheme && r.scheme !== 'http' && r.scheme !== 'https') {
           throw new Error(`Route ${index}: scheme must be "http" or "https".`);
         }
+        // Validate type if provided
+        if (r.type && r.type !== 'ip' && r.type !== 'domain') {
+          throw new Error(`Route ${index}: type must be "ip" or "domain".`);
+        }
+        // Validate domain is provided when type is "domain"
+        if (r.type === 'domain' && !r.domain) {
+          throw new Error(`Route ${index}: domain is required when type is "domain".`);
+        }
 
         const route: Route = {
           ip: r.ip,
@@ -305,6 +314,24 @@ export function routerAPI(expressApp: express.Application) {
           route.scheme = r.scheme;
         }
 
+        // Add type if provided (defaults to "ip" for backward compat)
+        if (r.type) {
+          route.type = r.type;
+        }
+
+        // Add domain if provided
+        if (r.domain) {
+          route.domain = r.domain;
+        }
+
+        // Add verify if provided (defaults to true if not specified)
+        if (r.verify !== undefined) {
+          if (typeof r.verify !== 'boolean') {
+            throw new Error(`Route ${index}: verify must be a boolean`);
+          }
+          route.verify = r.verify;
+        }
+
         // Add health check if provided
         if (r.healthCheck && r.healthCheck.path) {
           route.healthCheck = {
@@ -316,16 +343,44 @@ export function routerAPI(expressApp: express.Application) {
         return route;
       });
 
-      await registerRoutes(userid, validatedRoutes);
+      // Validate domain routes (IP routes are accepted without validation)
+      const { accepted, rejected } = await validateRoutes(validatedRoutes);
+
+      if (accepted.length === 0) {
+        console.log('All routes rejected', { userid, rejectedCount: rejected.length });
+        return res.status(400).json({
+          error: "All routes failed validation",
+          rejected: rejected.map(r => ({
+            ip: r.route.ip,
+            port: r.route.port,
+            type: r.route.type,
+            domain: r.route.domain,
+            error: r.error,
+          })),
+        });
+      }
+
+      await registerRoutes(userid, accepted);
 
       // Update lastRouteRegistration in Firestore
       await updateLastRouteRegistration(userid);
 
-      console.log('Routes registered', { userid, routeCount: validatedRoutes.length });
+      console.log('Routes registered', {
+        userid,
+        acceptedCount: accepted.length,
+        rejectedCount: rejected.length,
+      });
 
       return res.status(200).json({
         message: "Routes registered successfully.",
-        routes: validatedRoutes,
+        routes: accepted,
+        rejected: rejected.length > 0 ? rejected.map(r => ({
+          ip: r.route.ip,
+          port: r.route.port,
+          type: r.route.type,
+          domain: r.route.domain,
+          error: r.error,
+        })) : undefined,
         domain: `${userData.domainName}.${getServerDomain()}`
       });
     } catch (error) {
