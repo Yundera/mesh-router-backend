@@ -7,14 +7,6 @@ import { Route } from "./Routes.js";
 const VALIDATION_TIMEOUT = 5000;
 
 /**
- * Check if route validation is disabled via environment variable.
- * Useful for testing or when backend can't reach PCS directly.
- */
-function isValidationDisabled(): boolean {
-  return process.env.SKIP_ROUTE_VALIDATION === 'true';
-}
-
-/**
  * Result of route validation.
  */
 export interface ValidationResult {
@@ -33,23 +25,12 @@ export interface RoutesValidationResult {
 
 /**
  * Validate a single route by testing connectivity.
- * Routes with verify=false are accepted without validation.
- * All other routes (both IP and domain types) are validated.
+ * All routes (both IP and domain types) are validated.
  *
  * @param route - The route to validate
  * @returns ValidationResult indicating if the route is reachable
  */
 export async function validateRoute(route: Route): Promise<ValidationResult> {
-  // Check if validation is globally disabled
-  if (isValidationDisabled()) {
-    return { valid: true };
-  }
-
-  // Skip validation if route explicitly opts out
-  if (route.verify === false) {
-    return { valid: true };
-  }
-
   // For domain routes, require domain field
   if (route.type === 'domain' && !route.domain) {
     return { valid: false, error: 'Domain is required for domain routes' };
@@ -112,20 +93,12 @@ export async function validateRoute(route: Route): Promise<ValidationResult> {
 
 /**
  * Validate multiple routes and return accepted/rejected arrays.
- * Routes with verify=false are accepted without validation.
- * All other routes are validated for connectivity.
- * Set SKIP_ROUTE_VALIDATION=true to skip all validation (useful for testing).
+ * All routes are validated for connectivity.
  *
  * @param routes - Array of routes to validate
  * @returns Object containing accepted routes and rejected routes with errors
  */
 export async function validateRoutes(routes: Route[]): Promise<RoutesValidationResult> {
-  // Skip validation if disabled
-  if (isValidationDisabled()) {
-    console.log('[RouteValidator] Validation disabled via SKIP_ROUTE_VALIDATION=true');
-    return { accepted: routes, rejected: [] };
-  }
-
   const accepted: Route[] = [];
   const rejected: Array<{ route: Route; error: string }> = [];
 

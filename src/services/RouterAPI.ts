@@ -324,14 +324,6 @@ export function routerAPI(expressApp: express.Application) {
           route.domain = r.domain;
         }
 
-        // Add verify if provided (defaults to true if not specified)
-        if (r.verify !== undefined) {
-          if (typeof r.verify !== 'boolean') {
-            throw new Error(`Route ${index}: verify must be a boolean`);
-          }
-          route.verify = r.verify;
-        }
-
         // Add health check if provided
         if (r.healthCheck && r.healthCheck.path) {
           route.healthCheck = {
