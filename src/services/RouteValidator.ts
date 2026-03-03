@@ -1,4 +1,11 @@
 import { Route } from "./Routes.js";
+import https from 'https';
+import fs from 'fs';
+import path from 'path';
+import { fileURLToPath } from 'url';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 /**
  * Route validation timeout in milliseconds.
@@ -7,25 +14,134 @@ import { Route } from "./Routes.js";
 const VALIDATION_TIMEOUT = 5000;
 
 /**
+ * Load mesh-router CA certificate for validating nip.io domains.
+ * These domains use certificates signed by our private CA.
+ */
+const CA_CERT_PATH = process.env.CA_CERT_PATH || path.join(__dirname, '../../config/ca-cert.pem');
+let nipIoAgent: https.Agent | undefined;
+
+try {
+  if (fs.existsSync(CA_CERT_PATH)) {
+    const caCert = fs.readFileSync(CA_CERT_PATH);
+    nipIoAgent = new https.Agent({ ca: caCert });
+    console.log('[RouteValidator] Loaded CA cert for nip.io validation from', CA_CERT_PATH);
+  } else {
+    console.warn('[RouteValidator] CA cert not found at', CA_CERT_PATH, '- nip.io validation will use system CA');
+  }
+} catch (err) {
+  console.error('[RouteValidator] Failed to load CA cert:', err);
+}
+
+/**
  * Result of route validation.
  */
 export interface ValidationResult {
   valid: boolean;
   error?: string;
   responseTime?: number;
+  url?: string;  // The URL that was tested
 }
 
 /**
  * Result of validating multiple routes.
  */
 export interface RoutesValidationResult {
-  accepted: Route[];
-  rejected: Array<{ route: Route; error: string }>;
+  accepted: Array<{ route: Route; responseTime?: number; url?: string }>;
+  rejected: Array<{ route: Route; error: string; url?: string }>;
+}
+
+/**
+ * Validate HTTPS endpoint using https.request with custom CA support.
+ * Uses mesh-router CA for nip.io domains, system CA for others.
+ */
+function validateWithHttps(
+  url: string,
+  hostname: string,
+  port: number,
+  isNipIo: boolean,
+  startTime: number
+): Promise<ValidationResult> {
+  return new Promise((resolve) => {
+    const options: https.RequestOptions = {
+      hostname,
+      port,
+      path: '/',
+      method: 'HEAD',
+      timeout: VALIDATION_TIMEOUT,
+      // Use custom CA for nip.io, system CA for others (Let's Encrypt)
+      ...(isNipIo && nipIoAgent ? { agent: nipIoAgent } : {}),
+    };
+
+    const req = https.request(options, (res) => {
+      const responseTime = Date.now() - startTime;
+      // Any response (even 4xx) means the route is reachable
+      resolve({ valid: true, responseTime, url });
+    });
+
+    req.on('error', (err) => {
+      resolve(handleHttpError(err, url));
+    });
+
+    req.on('timeout', () => {
+      req.destroy();
+      resolve({ valid: false, error: 'Connection timeout - host unreachable', url });
+    });
+
+    req.end();
+  });
+}
+
+/**
+ * Handle HTTPS request errors with specific error messages.
+ */
+function handleHttpError(err: Error, url: string): ValidationResult {
+  const errorMessage = err.message;
+
+  if (errorMessage.includes('ECONNREFUSED')) {
+    return { valid: false, error: 'Connection refused - port may be blocked', url };
+  }
+  if (errorMessage.includes('ETIMEDOUT')) {
+    return { valid: false, error: 'Connection timeout - host unreachable', url };
+  }
+  if (errorMessage.includes('ENOTFOUND')) {
+    return { valid: false, error: 'DNS resolution failed', url };
+  }
+  if (errorMessage.includes('certificate') || errorMessage.includes('CERT_') || errorMessage.includes('SSL')) {
+    return { valid: false, error: `SSL certificate invalid: ${errorMessage}`, url };
+  }
+  if (errorMessage.includes('EHOSTUNREACH')) {
+    return { valid: false, error: 'Host unreachable', url };
+  }
+
+  return { valid: false, error: errorMessage, url };
+}
+
+/**
+ * Handle fetch errors (for HTTP requests).
+ */
+function handleFetchError(err: unknown, url: string): ValidationResult {
+  const errorMessage = err instanceof Error ? err.message : String(err);
+
+  if (errorMessage.includes('ECONNREFUSED')) {
+    return { valid: false, error: 'Connection refused - port may be blocked', url };
+  }
+  if (errorMessage.includes('ETIMEDOUT') || errorMessage.includes('aborted')) {
+    return { valid: false, error: 'Connection timeout - host unreachable', url };
+  }
+  if (errorMessage.includes('ENOTFOUND')) {
+    return { valid: false, error: 'DNS resolution failed', url };
+  }
+
+  return { valid: false, error: errorMessage, url };
 }
 
 /**
  * Validate a single route by testing connectivity.
  * All routes (both IP and domain types) are validated.
+ *
+ * For HTTPS routes:
+ * - nip.io domains: Validates using mesh-router CA
+ * - Other domains: Validates using system CA (Let's Encrypt, etc.)
  *
  * @param route - The route to validate
  * @returns ValidationResult indicating if the route is reachable
@@ -33,7 +149,7 @@ export interface RoutesValidationResult {
 export async function validateRoute(route: Route): Promise<ValidationResult> {
   // For domain routes, require domain field
   if (route.type === 'domain' && !route.domain) {
-    return { valid: false, error: 'Domain is required for domain routes' };
+    return { valid: false, error: 'Domain is required for domain routes', url: 'N/A' };
   }
 
   // Determine target host: use domain for domain routes, IP for IP routes
@@ -44,51 +160,35 @@ export async function validateRoute(route: Route): Promise<ValidationResult> {
   const startTime = Date.now();
   // Use targetScheme for backend connection, fallback to ingress scheme
   const targetScheme = route.targetScheme || route.scheme || 'https';
-  const url = `${targetScheme}://${targetHost}:${route.port}/`;
+  // Wrap IPv6 addresses in brackets for valid URL format
+  const hostForUrl = targetHost.includes(':') ? `[${targetHost}]` : targetHost;
+  const url = `${targetScheme}://${hostForUrl}:${route.port}/`;
 
+  // Determine if this is a nip.io domain (uses mesh-router CA)
+  const isNipIo = targetHost.endsWith('.nip.io');
+
+  // For HTTPS, use https.request with custom CA support
+  // For HTTP, use native fetch
+  if (targetScheme === 'https') {
+    return validateWithHttps(url, targetHost, route.port, isNipIo, startTime);
+  }
+
+  // HTTP validation using fetch
   try {
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), VALIDATION_TIMEOUT);
 
-    const response = await fetch(url, {
+    await fetch(url, {
       method: 'HEAD',
       signal: controller.signal,
-      // Ignore SSL certificate errors for self-signed certs
-      // Node.js: set NODE_TLS_REJECT_UNAUTHORIZED=0 or use custom agent
     });
 
     clearTimeout(timeoutId);
 
     const responseTime = Date.now() - startTime;
-
-    // Any response (even 4xx) means the route is reachable
-    // We're testing connectivity, not the application
-    return {
-      valid: true,
-      responseTime,
-    };
+    return { valid: true, responseTime, url };
   } catch (err) {
-    const errorMessage = err instanceof Error ? err.message : String(err);
-
-    // Check for specific error types
-    if (errorMessage.includes('ECONNREFUSED')) {
-      return { valid: false, error: 'Connection refused - port may be blocked' };
-    }
-    if (errorMessage.includes('ETIMEDOUT') || errorMessage.includes('aborted')) {
-      return { valid: false, error: 'Connection timeout - host unreachable' };
-    }
-    if (errorMessage.includes('ENOTFOUND')) {
-      return { valid: false, error: 'DNS resolution failed' };
-    }
-    if (errorMessage.includes('certificate')) {
-      // SSL errors still mean the host is reachable
-      return {
-        valid: true,
-        responseTime: Date.now() - startTime,
-      };
-    }
-
-    return { valid: false, error: errorMessage };
+    return handleFetchError(err, url);
   }
 }
 
@@ -100,8 +200,8 @@ export async function validateRoute(route: Route): Promise<ValidationResult> {
  * @returns Object containing accepted routes and rejected routes with errors
  */
 export async function validateRoutes(routes: Route[]): Promise<RoutesValidationResult> {
-  const accepted: Route[] = [];
-  const rejected: Array<{ route: Route; error: string }> = [];
+  const accepted: Array<{ route: Route; responseTime?: number; url?: string }> = [];
+  const rejected: Array<{ route: Route; error: string; url?: string }> = [];
 
   // Validate routes in parallel for efficiency
   const validationPromises = routes.map(async (route) => {
@@ -113,9 +213,9 @@ export async function validateRoutes(routes: Route[]): Promise<RoutesValidationR
 
   for (const { route, result } of results) {
     if (result.valid) {
-      accepted.push(route);
+      accepted.push({ route, responseTime: result.responseTime, url: result.url });
     } else {
-      rejected.push({ route, error: result.error || 'Unknown validation error' });
+      rejected.push({ route, error: result.error || 'Unknown validation error', url: result.url });
     }
   }
 

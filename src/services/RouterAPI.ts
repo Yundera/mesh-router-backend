@@ -342,8 +342,18 @@ export function routerAPI(expressApp: express.Application) {
       // Validate routes - all routes are validated for connectivity
       const { accepted, rejected } = await validateRoutes(validatedRoutes);
 
+      // Log each route validation result on one line
+      for (const { route, responseTime, url } of accepted) {
+        const routeDesc = route.type === 'domain' ? `${route.domain}` : `${route.ip}:${route.port}`;
+        console.log(`[${userid}] ✓ ACCEPT ${route.source}/${route.scheme || 'https'} ${routeDesc} (${responseTime}ms) ${url}`);
+      }
+      for (const { route, error, url } of rejected) {
+        const routeDesc = route.type === 'domain' ? `${route.domain}` : `${route.ip}:${route.port}`;
+        console.log(`[${userid}] ✗ REJECT ${route.source}/${route.scheme || 'https'} ${routeDesc} - ${error} ${url || ''}`);
+      }
+
       if (accepted.length === 0) {
-        console.log('All routes rejected', { userid, rejectedCount: rejected.length });
+        console.log(`[${userid}] All ${rejected.length} routes rejected`);
         return res.status(400).json({
           error: "All routes failed validation",
           rejected: rejected.map(r => ({
@@ -356,20 +366,18 @@ export function routerAPI(expressApp: express.Application) {
         });
       }
 
-      await registerRoutes(userid, accepted);
+      // Extract just the routes for storage
+      const routesToStore = accepted.map(a => a.route);
+      await registerRoutes(userid, routesToStore);
 
       // Update lastRouteRegistration in Firestore
       await updateLastRouteRegistration(userid);
 
-      console.log('Routes registered', {
-        userid,
-        acceptedCount: accepted.length,
-        rejectedCount: rejected.length,
-      });
+      console.log(`[${userid}] Routes registered: ${accepted.length} accepted, ${rejected.length} rejected`);
 
       return res.status(200).json({
         message: "Routes registered successfully.",
-        routes: accepted,
+        routes: routesToStore,
         rejected: rejected.length > 0 ? rejected.map(r => ({
           ip: r.route.ip,
           port: r.route.port,
