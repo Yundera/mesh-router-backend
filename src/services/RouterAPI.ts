@@ -465,44 +465,83 @@ export function routerAPI(expressApp: express.Application) {
   /**
    * GET /domains/active
    * List all active domains (domains with route activity within INACTIVE_DOMAIN_DAYS).
-   * Returns domain info including lastRouteRegistration timestamp.
+   * Returns full domain info: online status, routes, time remaining before release.
    */
   router.get('/domains/active', async (req, res) => {
     try {
       const inactiveDays = getInactiveDomainDays();
+      const onlineThresholdSeconds = 660; // matches checkOnlineStatus threshold
+      const now = Date.now();
+      const releaseCutoffMs = inactiveDays * 24 * 60 * 60 * 1000;
 
       // Get active user IDs from Redis
       const activeUserIds = await getActiveUserIds(inactiveDays);
 
-      // Fetch domain info from Firestore for each active user
-      const domains: Array<{
-        userId: string;
-        domainName: string;
-        lastRouteRegistration: string | null;
-      }> = [];
+      const online: Array<Record<string, unknown>> = [];
+      const offline: Array<Record<string, unknown>> = [];
 
       for (const userId of activeUserIds) {
         try {
           const userData = await getUserDomain(userId);
-          if (userData && userData.domainName) {
-            // Get activity timestamp from Redis for accurate lastRouteRegistration
-            const activityTs = await getActivityTimestamp(userId);
-            domains.push({
-              userId,
-              domainName: userData.domainName,
-              lastRouteRegistration: activityTs ? new Date(activityTs).toISOString() : userData.lastRouteRegistration || null,
-            });
+          if (!userData || !userData.domainName) continue;
+
+          const activityTs = await getActivityTimestamp(userId);
+          const lastRouteRegistration = activityTs
+            ? new Date(activityTs).toISOString()
+            : userData.lastRouteRegistration || null;
+
+          const routes = await getRoutes(userId);
+          const routesTtl = await getRoutesTTL(userId);
+
+          // Online = route registration within threshold
+          const lastRegMs = lastRouteRegistration ? new Date(lastRouteRegistration).getTime() : 0;
+          const secondsSinceLastReg = (now - lastRegMs) / 1000;
+          const isOnline = lastRouteRegistration !== null && secondsSinceLastReg <= onlineThresholdSeconds;
+
+          // Time remaining before domain release (based on inactiveDays from last activity)
+          const activityAgeMs = lastRegMs > 0 ? now - lastRegMs : releaseCutoffMs;
+          const remainingMs = Math.max(0, releaseCutoffMs - activityAgeMs);
+          const remainingDays = Math.floor(remainingMs / (24 * 60 * 60 * 1000));
+          const remainingHours = Math.floor((remainingMs % (24 * 60 * 60 * 1000)) / (60 * 60 * 1000));
+
+          const entry = {
+            userId,
+            domainName: userData.domainName,
+            domain: `${userData.domainName}.${getServerDomain()}`,
+            online: isOnline,
+            lastRouteRegistration,
+            routesTtl,
+            routeCount: routes?.length || 0,
+            routes: routes || [],
+            releaseIn: remainingDays > 0
+              ? `${remainingDays}d ${remainingHours}h`
+              : `${remainingHours}h`,
+            releaseInMs: remainingMs,
+          };
+
+          if (isOnline) {
+            online.push(entry);
+          } else {
+            offline.push(entry);
           }
         } catch (error) {
           console.error(`Error fetching domain for user ${userId}:`, error);
-          // Continue with other users
         }
       }
 
+      // Sort: online by domain name, offline by release time (soonest first)
+      online.sort((a, b) => String(a.domainName).localeCompare(String(b.domainName)));
+      offline.sort((a, b) => Number(a.releaseInMs) - Number(b.releaseInMs));
+
       return res.status(200).json({
-        domains,
-        count: domains.length,
-        inactiveDays,
+        online,
+        offline,
+        summary: {
+          total: online.length + offline.length,
+          online: online.length,
+          offline: offline.length,
+          inactiveDays,
+        },
       });
     } catch (error) {
       console.error("Error in GET /domains/active", error);
