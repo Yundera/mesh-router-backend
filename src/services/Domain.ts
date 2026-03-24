@@ -276,38 +276,17 @@ function isValidIpAddress(ip: string): boolean {
 }
 
 /**
- * Updates the lastSeenOnline timestamp for a user (heartbeat).
- * @param userId - The user ID
- * @returns The updated timestamp
- */
-export async function updateHeartbeat(userId: string): Promise<string> {
-  if (!userId) {
-    throw new Error("User ID is required.");
-  }
-
-  const userData = await getUserDomain(userId);
-  if (!userData) {
-    throw new Error("User not found. Register a domain first.");
-  }
-
-  const lastSeenOnline = new Date().toISOString();
-  const userDocRef = admin.firestore().collection(NSL_ROUTER_COLLECTION).doc(userId);
-  await userDocRef.update({ lastSeenOnline });
-
-  return lastSeenOnline;
-}
-
-/**
  * Default threshold in seconds to consider a user offline.
- * If no heartbeat received within this time, user is considered offline.
+ * Routes refresh every ~300s (agent + tunnel), so 660s gives margin for one missed refresh.
  */
-const DEFAULT_OFFLINE_THRESHOLD_SECONDS = 120; // 2 minutes
+const DEFAULT_OFFLINE_THRESHOLD_SECONDS = 660;
 
 /**
- * Checks if a user is currently online based on their lastSeenOnline timestamp.
+ * Checks if a user is currently online based on their lastRouteRegistration timestamp.
+ * A user is online if routes were registered within the threshold period.
  * @param userId - The user ID
- * @param thresholdSeconds - Optional threshold in seconds (default: 120 seconds / 2 minutes)
- * @returns Online status with lastSeenOnline timestamp
+ * @param thresholdSeconds - Optional threshold in seconds (default: 660 seconds)
+ * @returns Online status with lastSeenOnline timestamp (uses lastRouteRegistration as source)
  */
 export async function checkOnlineStatus(
   userId: string,
@@ -322,7 +301,7 @@ export async function checkOnlineStatus(
     throw new Error("User not found.");
   }
 
-  const lastSeenOnline = userData.lastSeenOnline ?? null;
+  const lastSeenOnline = userData.lastRouteRegistration ?? null;
 
   if (!lastSeenOnline) {
     return { online: false, lastSeenOnline: null };

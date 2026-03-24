@@ -7,10 +7,8 @@ export interface NSLRouterData {
     // Target port where Caddy listens for incoming traffic (default: 443)
     targetPort?: number;
 
-    // Heartbeat / online status
-    lastSeenOnline?: string;
-
     // Last route registration timestamp (ISO format) - updated on POST /routes
+    // Also used as online status indicator (replaces deprecated lastSeenOnline)
     lastRouteRegistration?: string;
 
     //meta

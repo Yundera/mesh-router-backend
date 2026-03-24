@@ -1,7 +1,7 @@
 import express, { Request } from "express";
 import {verifySignature} from "../library/KeyLib.js";
 import {authenticate, AuthUserRequest} from "./ExpressAuthenticateMiddleWare.js";
-import {checkDomainAvailability, deleteUserDomain, getUserDomain, updateUserDomain, updateHeartbeat, checkOnlineStatus, getDomain, updateLastRouteRegistration, getAllUserDomains} from "./Domain.js";
+import {checkDomainAvailability, deleteUserDomain, getUserDomain, updateUserDomain, checkOnlineStatus, getDomain, updateLastRouteRegistration, getAllUserDomains} from "./Domain.js";
 import {getServerDomain, getInactiveDomainDays} from "../configuration/config.js";
 import {registerRoutes, getRoutes, deleteRoutes, Route, getRoutesTTL, getActiveUserIds, getActivityTimestamp} from "./Routes.js";
 import {validateRoutes} from "./RouteValidator.js";
@@ -162,48 +162,6 @@ export function routerAPI(expressApp: express.Application) {
       return res.status(200).json({ message: "Domain information deleted successfully." });
     } catch (error) {
       console.error("Error in DELETE /domain", error);
-      return res.status(500).json({ error: error.toString() });
-    }
-  });
-
-  /**
-   * POST /heartbeat/:userid/:sig
-   * Updates the lastSeenOnline timestamp for a user (heartbeat/keep-alive).
-   * The signature must be a valid Ed25519 signature of the userid using the user's registered public key.
-   */
-  router.post('/heartbeat/:userid/:sig', async (req, res) => {
-    const { userid, sig } = req.params;
-
-    try {
-      const userData = await getUserDomain(userid);
-
-      if (!userData) {
-        return res.status(404).json({ error: "User not found. Register a domain first." });
-      }
-
-      // Verify signature using stored public key
-      let isValid = false;
-      try {
-        isValid = await verifySignature(userData.publicKey, sig, userid);
-      } catch (e) {
-        console.log('Invalid signature format for heartbeat', { userid, error: e.message });
-        return res.status(401).json({ error: "Invalid signature." });
-      }
-
-      if (!isValid) {
-        logAuthFailure(req, 'invalid_signature', { userid, endpoint: 'heartbeat' });
-        return res.status(401).json({ error: "Invalid signature." });
-      }
-
-      const lastSeenOnline = await updateHeartbeat(userid);
-      console.log('Heartbeat received', { userid, lastSeenOnline });
-
-      return res.status(200).json({
-        message: "Heartbeat received.",
-        lastSeenOnline
-      });
-    } catch (error) {
-      console.error("Error in POST /heartbeat/:userid/:sig", error);
       return res.status(500).json({ error: error.toString() });
     }
   });
@@ -492,7 +450,7 @@ export function routerAPI(expressApp: express.Application) {
         serverDomain: getServerDomain(),
         routes: routes || [],  // Empty array if no routes registered
         routesTtl,  // Seconds until routes expire (-2 if no routes)
-        lastSeenOnline: domainData.domain.lastSeenOnline || null,  // Informational
+        lastSeenOnline: domainData.domain.lastRouteRegistration || null,  // Updated on route registration
       });
     } catch (error) {
       console.error("Error in GET /resolve/v2/:domain", error);
