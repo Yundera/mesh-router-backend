@@ -300,18 +300,21 @@ export function routerAPI(expressApp: express.Application) {
       // Validate routes - all routes are validated for connectivity
       const { accepted, rejected } = await validateRoutes(validatedRoutes);
 
-      // Log each route validation result on one line
-      for (const { route, responseTime, url } of accepted) {
-        const routeDesc = route.type === 'domain' ? `${route.domain}` : `${route.ip}:${route.port}`;
-        console.log(`[${userid}] ✓ ACCEPT ${route.source}/${route.scheme || 'https'} ${routeDesc} (${responseTime}ms) ${url}`);
+      // One-line summary for successful registrations
+      if (accepted.length > 0) {
+        const summary = accepted.map(({ route }) => {
+          const host = route.type === 'domain' ? route.domain : route.ip;
+          return `${route.scheme || 'https'}://${host}:${route.port}`;
+        }).join(', ');
+        console.log(`[${userid}] ✓ ${accepted.length}/${accepted.length + rejected.length} routes accepted: ${summary}`);
       }
+      // One line per failure with detail
       for (const { route, error, url } of rejected) {
-        const routeDesc = route.type === 'domain' ? `${route.domain}` : `${route.ip}:${route.port}`;
+        const routeDesc = route.type === 'domain' ? route.domain : `${route.ip}:${route.port}`;
         console.log(`[${userid}] ✗ REJECT ${route.source}/${route.scheme || 'https'} ${routeDesc} - ${error} ${url || ''}`);
       }
 
       if (accepted.length === 0) {
-        console.log(`[${userid}] All ${rejected.length} routes rejected`);
         return res.status(400).json({
           error: "All routes failed validation",
           rejected: rejected.map(r => ({
@@ -330,8 +333,6 @@ export function routerAPI(expressApp: express.Application) {
 
       // Update lastRouteRegistration in Firestore
       await updateLastRouteRegistration(userid);
-
-      console.log(`[${userid}] Routes registered: ${accepted.length} accepted, ${rejected.length} rejected`);
 
       return res.status(200).json({
         message: "Routes registered successfully.",

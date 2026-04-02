@@ -14,19 +14,18 @@ const __dirname = path.dirname(__filename);
 const VALIDATION_TIMEOUT = 5000;
 
 /**
- * Load mesh-router CA certificate for validating nip.io domains.
- * These domains use certificates signed by our private CA.
+ * Load mesh-router CA certificate for validating routes using our private CA.
  */
 const CA_CERT_PATH = process.env.CA_CERT_PATH || path.join(__dirname, '../../config/ca-cert.pem');
-let nipIoAgent: https.Agent | undefined;
+let customCaAgent: https.Agent | undefined;
 
 try {
   if (fs.existsSync(CA_CERT_PATH)) {
     const caCert = fs.readFileSync(CA_CERT_PATH);
-    nipIoAgent = new https.Agent({ ca: caCert });
-    console.log('[RouteValidator] Loaded CA cert for nip.io validation from', CA_CERT_PATH);
+    customCaAgent = new https.Agent({ ca: caCert });
+    console.log('[RouteValidator] Loaded custom CA cert from', CA_CERT_PATH);
   } else {
-    console.warn('[RouteValidator] CA cert not found at', CA_CERT_PATH, '- nip.io validation will use system CA');
+    console.warn('[RouteValidator] CA cert not found at', CA_CERT_PATH, '- HTTPS validation will use system CA only');
   }
 } catch (err) {
   console.error('[RouteValidator] Failed to load CA cert:', err);
@@ -51,43 +50,52 @@ export interface RoutesValidationResult {
 }
 
 /**
- * Validate HTTPS endpoint using https.request with custom CA support.
- * Uses mesh-router CA for nip.io domains, system CA for others.
+ * Validate HTTPS endpoint using https.request.
+ * Races system CA and custom CA in parallel — if either succeeds, the route is valid.
+ * This handles both publicly-trusted certs and mesh-router CA-signed certs.
  */
 function validateWithHttps(
   url: string,
   hostname: string,
   port: number,
-  isNipIo: boolean,
   startTime: number
 ): Promise<ValidationResult> {
-  return new Promise((resolve) => {
-    const options: https.RequestOptions = {
-      hostname,
-      port,
-      path: '/',
-      method: 'HEAD',
-      timeout: VALIDATION_TIMEOUT,
-      // Use custom CA for nip.io, system CA for others (Let's Encrypt)
-      ...(isNipIo && nipIoAgent ? { agent: nipIoAgent } : {}),
-    };
+  const makeRequest = (agent?: https.Agent): Promise<ValidationResult> =>
+    new Promise((resolve) => {
+      const options: https.RequestOptions = {
+        hostname,
+        port,
+        path: '/',
+        method: 'HEAD',
+        timeout: VALIDATION_TIMEOUT,
+        ...(agent ? { agent } : {}),
+      };
 
-    const req = https.request(options, (res) => {
-      const responseTime = Date.now() - startTime;
-      // Any response (even 4xx) means the route is reachable
-      resolve({ valid: true, responseTime, url });
+      const req = https.request(options, () => {
+        const responseTime = Date.now() - startTime;
+        resolve({ valid: true, responseTime, url });
+      });
+
+      req.on('error', (err) => {
+        resolve(handleHttpError(err, url));
+      });
+
+      req.on('timeout', () => {
+        req.destroy();
+        resolve({ valid: false, error: 'Connection timeout - host unreachable', url });
+      });
+
+      req.end();
     });
 
-    req.on('error', (err) => {
-      resolve(handleHttpError(err, url));
-    });
+  // Race system CA and custom CA — first valid wins
+  const attempts = [makeRequest()];
+  if (customCaAgent) {
+    attempts.push(makeRequest(customCaAgent));
+  }
 
-    req.on('timeout', () => {
-      req.destroy();
-      resolve({ valid: false, error: 'Connection timeout - host unreachable', url });
-    });
-
-    req.end();
+  return Promise.all(attempts).then((results) => {
+    return results.find((r) => r.valid) || results[0];
   });
 }
 
@@ -139,9 +147,7 @@ function handleFetchError(err: unknown, url: string): ValidationResult {
  * Validate a single route by testing connectivity.
  * All routes (both IP and domain types) are validated.
  *
- * For HTTPS routes:
- * - nip.io domains: Validates using mesh-router CA
- * - Other domains: Validates using system CA (Let's Encrypt, etc.)
+ * For HTTPS routes, races system CA and custom CA — accepts if either succeeds.
  *
  * @param route - The route to validate
  * @returns ValidationResult indicating if the route is reachable
@@ -164,16 +170,11 @@ export async function validateRoute(route: Route): Promise<ValidationResult> {
   const hostForUrl = targetHost.includes(':') ? `[${targetHost}]` : targetHost;
   const url = `${targetScheme}://${hostForUrl}:${route.port}/`;
 
-  // Determine if this is a nip.io domain (uses mesh-router CA)
-  const isNipIo = targetHost.endsWith('.nip.io');
-
-  // For HTTPS, use https.request with custom CA support
-  // For HTTP, use native fetch
   if (targetScheme === 'https') {
-    return validateWithHttps(url, targetHost, route.port, isNipIo, startTime);
+    return validateWithHttps(url, targetHost, route.port, startTime);
   }
 
-  // HTTP validation using fetch
+  // HTTP validation using fetch (don't follow redirects — a 3xx still means the route is reachable)
   try {
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), VALIDATION_TIMEOUT);
@@ -181,6 +182,7 @@ export async function validateRoute(route: Route): Promise<ValidationResult> {
     await fetch(url, {
       method: 'HEAD',
       signal: controller.signal,
+      redirect: 'manual',
     });
 
     clearTimeout(timeoutId);
