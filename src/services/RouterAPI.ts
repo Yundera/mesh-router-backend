@@ -8,6 +8,7 @@ import {validateRoutes} from "./RouteValidator.js";
 import {getCACertificate, signCSR, isCAInitialized} from "./CertificateAuthority.js";
 import {logDomainAssigned} from "./DomainLogger.js";
 import {runCleanup} from "./DomainCleanup.js";
+import {probeCandidates, checkRateLimit, PROBE_LIMITS} from "./Probe.js";
 
 /**
  * Logs authentication failures with relevant context for security monitoring.
@@ -710,6 +711,58 @@ export function routerAPI(expressApp: express.Application) {
         return res.status(400).json({ error: error.message });
       }
 
+      return res.status(500).json({ error: error.toString() });
+    }
+  });
+
+  /**
+   * POST /probe
+   * Probes candidate public IPs from the backend's vantage point using ICMP.
+   * Used by the PCS ensure-script at bootstrap to verify which of the
+   * locally-detected IPs are actually reachable from the public internet,
+   * before any agent identity exists.
+   *
+   * Body: { candidates: string[] }
+   *   - Up to 4 candidates per call.
+   *   - LAN / reserved ranges are rejected without probing.
+   *
+   * Response: { results: ProbeResult[] } where each result has
+   *   { ip, family, reachable, reason? }
+   *
+   * Unauthenticated by design (the caller has no identity at bootstrap),
+   * rate-limited per source IP to prevent abuse as a distributed pinger.
+   */
+  router.post('/probe', async (req, res) => {
+    const clientIp = req.ip || req.socket?.remoteAddress || 'unknown';
+
+    const rate = checkRateLimit(clientIp);
+    if (!rate.allowed) {
+      if (rate.retryAfterSeconds !== undefined) {
+        res.setHeader('Retry-After', String(rate.retryAfterSeconds));
+      }
+      return res.status(429).json({
+        error: `Rate limit exceeded (max ${PROBE_LIMITS.RATE_LIMIT_MAX_REQUESTS} probes per ${PROBE_LIMITS.RATE_LIMIT_WINDOW_MS / 1000}s per source IP).`,
+      });
+    }
+
+    const { candidates } = req.body ?? {};
+    if (!Array.isArray(candidates) || candidates.length === 0) {
+      return res.status(400).json({ error: "candidates must be a non-empty array of IP strings." });
+    }
+    if (candidates.some((c) => typeof c !== 'string')) {
+      return res.status(400).json({ error: "every candidate must be a string." });
+    }
+    if (candidates.length > PROBE_LIMITS.MAX_CANDIDATES_PER_REQUEST) {
+      return res.status(400).json({
+        error: `at most ${PROBE_LIMITS.MAX_CANDIDATES_PER_REQUEST} candidates per request.`,
+      });
+    }
+
+    try {
+      const results = await probeCandidates(candidates);
+      return res.status(200).json({ results });
+    } catch (error) {
+      console.error("Error in POST /probe", error);
       return res.status(500).json({ error: error.toString() });
     }
   });
