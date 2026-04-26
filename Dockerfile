@@ -19,6 +19,13 @@ COPY . /app
 RUN pnpm run build
 
 FROM base
+# iputils-ping is required by /probe (Probe.ts shells out to `ping` to verify
+# whether candidate IPs are reachable from the backend's vantage point). The
+# Debian package's filecaps + Docker's default NET_RAW capability mean this
+# works for non-root invocation without --cap-add at runtime.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends iputils-ping \
+ && rm -rf /var/lib/apt/lists/*
 COPY --from=prod-deps /app/node_modules /app/node_modules
 COPY --from=build /app/dist /app/dist
 EXPOSE 8192
