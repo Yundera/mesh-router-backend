@@ -136,6 +136,18 @@ export async function getTestUserSourceTTL(userId: string, source: string): Prom
 }
 
 /**
+ * Clean up usage (DAU) keys for a specific test app/uid/date.
+ * Targeted so it never touches real usage data: removes the per-app DAU set and
+ * per-user set entirely, and prunes the test entries from the shared daily sets.
+ */
+export async function cleanupTestUsage(app: string, uid: string, date: string): Promise<void> {
+  const redis = getRedisClient();
+  await redis.del(`usage:dau:${app}:${date}`, `usage:user:${uid}:${date}`);
+  await redis.srem(`usage:apps:${date}`, app);
+  await redis.srem(`usage:active:${date}`, uid);
+}
+
+/**
  * Sleep for specified milliseconds
  */
 export function sleep(ms: number): Promise<void> {

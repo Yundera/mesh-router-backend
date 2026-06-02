@@ -1,6 +1,6 @@
 import express, { Request } from "express";
 import {verifySignature} from "../library/KeyLib.js";
-import {authenticate, AuthUserRequest} from "./ExpressAuthenticateMiddleWare.js";
+import {authenticate, authenticateService, AuthUserRequest} from "./ExpressAuthenticateMiddleWare.js";
 import {checkDomainAvailability, deleteUserDomain, getUserDomain, updateUserDomain, checkOnlineStatus, getDomain, updateLastRouteRegistration, getAllUserDomains} from "./Domain.js";
 import {getServerDomain, getInactiveDomainDays} from "../configuration/config.js";
 import {registerRoutes, getRoutes, deleteRoutes, Route, getRoutesTTL, getActiveUserIds, getActivityTimestamp} from "./Routes.js";
@@ -9,6 +9,7 @@ import {getCACertificate, signCSR, isCAInitialized} from "./CertificateAuthority
 import {logDomainAssigned} from "./DomainLogger.js";
 import {runCleanup} from "./DomainCleanup.js";
 import {probeCandidates, checkRateLimit, PROBE_LIMITS} from "./Probe.js";
+import {recordUsage, UsageEvent, MAX_USAGE_EVENTS_PER_REQUEST} from "./Usage.js";
 
 /**
  * Logs authentication failures with relevant context for security monitoring.
@@ -601,6 +602,51 @@ export function routerAPI(expressApp: express.Application) {
       });
     } catch (error) {
       console.error("Error in POST /admin/cleanup", error);
+      return res.status(500).json({ error: error.toString() });
+    }
+  });
+
+  // ============================================================================
+  // Usage (DAU) ingest API
+  // ============================================================================
+
+  /**
+   * POST /internal/usage/ingest
+   * Fire-and-forget usage notifications from the gateways (CF Worker / OpenResty).
+   * Records distinct (uid, app, day) tuples for the Daily Active Users KPI.
+   *
+   * Auth: Bearer SERVICE_API_KEY (service-only; uid is in the payload, not the caller).
+   *
+   * Body: { "events": [ { "uid": "abc", "app": "nextcloud" } ] }
+   * Responds 204 on success (callers do not read the body).
+   */
+  router.post('/internal/usage/ingest', authenticateService, async (req, res) => {
+    try {
+      const body = req.body as { events?: unknown };
+      if (!body || !Array.isArray(body.events)) {
+        return res.status(400).json({ error: "Body must contain an 'events' array" });
+      }
+
+      if (body.events.length > MAX_USAGE_EVENTS_PER_REQUEST) {
+        return res.status(413).json({ error: `Too many events (max ${MAX_USAGE_EVENTS_PER_REQUEST})` });
+      }
+
+      // Keep only well-formed entries; malformed ones are ignored, not rejected.
+      const events: UsageEvent[] = [];
+      for (const e of body.events) {
+        if (
+          e && typeof e === 'object' &&
+          typeof (e as UsageEvent).uid === 'string' && (e as UsageEvent).uid.length > 0 &&
+          typeof (e as UsageEvent).app === 'string' && (e as UsageEvent).app.length > 0
+        ) {
+          events.push({ uid: (e as UsageEvent).uid, app: (e as UsageEvent).app });
+        }
+      }
+
+      await recordUsage(events);
+      return res.status(204).end();
+    } catch (error) {
+      console.error("Error in POST /internal/usage/ingest", error);
       return res.status(500).json({ error: error.toString() });
     }
   });

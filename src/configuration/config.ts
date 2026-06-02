@@ -32,6 +32,11 @@ const DEFAULT_DOMAIN_LOG_PATH = "logs/domain-events.log";
 const DEFAULT_CLEANUP_CRON_SCHEDULE = "0 3 * * *";
 
 /**
+ * Default retention for usage (DAU) daily buckets in seconds (90 days).
+ */
+const DEFAULT_USAGE_RETENTION_SECONDS = 90 * 24 * 60 * 60; // 7776000
+
+/**
  * Returns the number of days of inactivity before a domain is considered inactive.
  * @returns Number of days
  */
@@ -76,4 +81,20 @@ export function getRoutesTtl(): number {
     }
   }
   return DEFAULT_ROUTES_TTL_SECONDS;
+}
+
+/**
+ * Returns the retention for usage (DAU) daily buckets from environment or default.
+ * Each usage:* daily key expires after this many seconds (rolling ~90 day window).
+ * @returns Retention in seconds
+ */
+export function getUsageRetentionSeconds(): number {
+  const envValue = process.env.USAGE_RETENTION_SECONDS;
+  if (envValue) {
+    const parsed = parseInt(envValue, 10);
+    if (!isNaN(parsed) && parsed > 0) {
+      return parsed;
+    }
+  }
+  return DEFAULT_USAGE_RETENTION_SECONDS;
 }
