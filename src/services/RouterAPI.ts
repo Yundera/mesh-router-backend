@@ -10,6 +10,7 @@ import {logDomainAssigned} from "./DomainLogger.js";
 import {runCleanup} from "./DomainCleanup.js";
 import {probeCandidates, checkRateLimit, PROBE_LIMITS} from "./Probe.js";
 import {recordUsage, UsageEvent, MAX_USAGE_EVENTS_PER_REQUEST} from "./Usage.js";
+import {verifyEmailCredential, sendUserEmail, EmailError, EmailSendRequest} from "./Email.js";
 
 /**
  * Logs authentication failures with relevant context for security monitoring.
@@ -647,6 +648,66 @@ export function routerAPI(expressApp: express.Application) {
       return res.status(204).end();
     } catch (error) {
       console.error("Error in POST /internal/usage/ingest", error);
+      return res.status(500).json({ error: error.toString() });
+    }
+  });
+
+  // ============================================================================
+  // Per-user mail relay API
+  // ============================================================================
+
+  /**
+   * POST /email/send
+   * Sends a transactional email on behalf of a user. Called by the mail-gateway
+   * running on each PCS, which forwards app emails (Vaultwarden, Nextcloud, ...).
+   *
+   * Auth: Authorization: Bearer <userid>:<signature>
+   *   - signature is an Ed25519 signature of the userid (same primitive as route
+   *     registration). The userid is only trusted after the signature is verified.
+   *
+   * Body: { to, subject, text, html?, appName, attachments? }
+   *
+   * The From address is enforced server-side as <app>.<user-domain>@<server-domain>
+   * (e.g. vaultwarden.john@nsl.sh) — the caller cannot influence the identity part,
+   * so a user can never send mail as another user.
+   */
+  router.post('/email/send', async (req, res) => {
+    try {
+      const authHeader = req.get('authorization') || '';
+      const match = authHeader.match(/^Bearer\s+(.+)$/i);
+      if (!match) {
+        return res.status(401).json({ error: "Missing or malformed Authorization header." });
+      }
+      const credential = match[1].trim();
+
+      const body = req.body as EmailSendRequest;
+      if (!body || !body.to || !body.subject || !body.text || !body.appName) {
+        return res.status(400).json({ error: "Missing required fields: to, subject, text, appName." });
+      }
+
+      // Establish identity at the verification step (never trust a caller-supplied userid).
+      let identity;
+      try {
+        identity = await verifyEmailCredential(credential);
+      } catch (e) {
+        if (e instanceof EmailError) {
+          logAuthFailure(req, 'invalid_email_credential', { endpoint: 'email_send' });
+          return res.status(e.status).json({ error: e.message });
+        }
+        throw e;
+      }
+
+      try {
+        const { from, skipped } = await sendUserEmail(identity, body);
+        return res.status(200).json({ success: true, from, skipped });
+      } catch (e) {
+        if (e instanceof EmailError) {
+          return res.status(e.status).json({ error: e.message });
+        }
+        throw e;
+      }
+    } catch (error) {
+      console.error("Error in POST /email/send", error);
       return res.status(500).json({ error: error.toString() });
     }
   });

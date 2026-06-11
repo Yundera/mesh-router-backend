@@ -28,7 +28,7 @@ services:
       - GOOGLE_APPLICATION_CREDENTIALS=/app/config/serviceAccount.json
       # Redis connection for routes storage
       - REDIS_URL=redis://redis:6379
-      - SERVER_DOMAIN=test.example.com
+      - SERVER_DOMAIN=${SERVER_DOMAIN:-test.example.com}
     env_file:
       - path: .env
         required: false

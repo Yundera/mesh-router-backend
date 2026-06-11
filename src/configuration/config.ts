@@ -12,6 +12,16 @@ export function getServerDomain(): string {
 }
 
 /**
+ * Returns the SendGrid API key used by the per-user mail relay (POST /email/send),
+ * or undefined if mail sending is not configured. When undefined, sends are skipped
+ * (logged) rather than failing, so non-mail deployments and local dev still work.
+ * The SendGrid sending domain must match SERVER_DOMAIN (e.g. nsl.sh) with DKIM/SPF/DMARC.
+ */
+export function getSendgridApiKey(): string | undefined {
+  return process.env.SENDGRID_API_KEY || undefined;
+}
+
+/**
  * Default TTL for route entries in seconds.
  */
 const DEFAULT_ROUTES_TTL_SECONDS = 600; // 10 minutes
