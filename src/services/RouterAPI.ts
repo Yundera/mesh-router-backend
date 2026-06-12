@@ -11,6 +11,7 @@ import {runCleanup} from "./DomainCleanup.js";
 import {probeCandidates, checkRateLimit, PROBE_LIMITS} from "./Probe.js";
 import {recordUsage, UsageEvent, MAX_USAGE_EVENTS_PER_REQUEST} from "./Usage.js";
 import {verifyEmailCredential, sendUserEmail, EmailError, EmailSendRequest} from "./Email.js";
+import admin from "firebase-admin";
 
 /**
  * Logs authentication failures with relevant context for security monitoring.
@@ -102,6 +103,52 @@ export function routerAPI(expressApp: express.Application) {
       }
     } catch (error) {
       res.json({ error: error.toString() });
+    }
+  });
+
+  /**
+   * GET /user/email/:userid/:sig
+   * Returns the account email for the user, read live from Firebase Auth.
+   * Authenticated by the same Ed25519 signature scheme as route registration
+   * (sign(userid) with the private key whose public key is stored for the user).
+   * Used by the PCS self-check (ensure-email-synced.sh) to expose the real
+   * account email to installed apps via ${APP_EMAIL}.
+   */
+  router.get('/user/email/:userid/:sig', async (req, res) => {
+    const { userid, sig } = req.params;
+    try {
+      const userData = await getUserDomain(userid);
+      if (!userData) {
+        return res.status(404).json({ error: "User not found." });
+      }
+
+      let isValid = false;
+      try {
+        isValid = await verifySignature(userData.publicKey, sig, userid);
+      } catch (e) {
+        console.log('Invalid signature format for user email lookup', { userid, error: e.message });
+        return res.status(401).json({ error: "Invalid signature." });
+      }
+      if (!isValid) {
+        logAuthFailure(req, 'invalid_signature', { userid, endpoint: 'user_email' });
+        return res.status(401).json({ error: "Invalid signature." });
+      }
+
+      // Firebase Auth is the authoritative source of the account email.
+      let email: string | undefined;
+      try {
+        const userRecord = await admin.auth().getUser(userid);
+        email = userRecord.email;
+      } catch (e) {
+        return res.status(404).json({ error: "No Firebase user for this id." });
+      }
+      if (!email) {
+        return res.status(404).json({ error: "No email on file for this user." });
+      }
+
+      return res.status(200).json({ email });
+    } catch (error) {
+      return res.status(500).json({ error: error.toString() });
     }
   });
 
