@@ -1,4 +1,10 @@
-FROM node:lts AS base
+# Pinned to Node 20: node-fetch 2.x (via firebase-admin → google-auth-library →
+# gaxios 6 → node-fetch 2.7) throws "Premature close" minting Google OAuth2
+# access tokens on Node 22/24. The unpinned `node:lts` floated to 24 and broke
+# admin.auth() token mints (reset-link CLI + dashboard password reset). Node 20
+# is verified working with the same node_modules. Revisit when firebase-admin
+# moves to gaxios 7 (native fetch).
+FROM node:20 AS base
 ENV PNPM_HOME="/pnpm"
 ENV PATH="$PNPM_HOME:$PATH"
 RUN corepack enable
