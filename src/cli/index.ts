@@ -13,6 +13,7 @@
 import { main as usageApp } from "../scripts/usage-app.js";
 import { main as usageTop } from "../scripts/usage-top.js";
 import { main as usageSummary } from "../scripts/usage-summary.js";
+import { main as resetLink } from "../scripts/reset-link.js";
 
 type Command = {
   name: string;
@@ -35,6 +36,11 @@ const COMMANDS: Command[] = [
     name: "top",
     description: "Apps ranked by active users: [--date YYYY-MM-DD] [--days N] [--top N] [--json].",
     run: usageTop,
+  },
+  {
+    name: "reset-link",
+    description: "Generate a Firebase password-reset link (does not send mail): <email> [--json].",
+    run: resetLink,
   },
 ];
 
