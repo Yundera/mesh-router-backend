@@ -1,5 +1,5 @@
 /**
- * Shared CLI helpers for the mesh-usage commands.
+ * Shared CLI helpers for the mesh-cli commands.
  * Mirrors the hand-rolled parsing / table style of the pcs-orchestrator CLI
  * (no argument-parsing library, padEnd columns, "—" for missing values).
  */

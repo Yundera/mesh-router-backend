@@ -1,5 +1,5 @@
 /**
- * mesh-usage app <app> [--days N] [--date YYYY-MM-DD] [--json]
+ * mesh-cli app <app> [--days N] [--date YYYY-MM-DD] [--json]
  *
  * Distinct active users for one app. Default shows the DAU/WAU/MAU trio ending
  * at --date (today UTC). With --days N, shows active users over that single window.
@@ -10,7 +10,7 @@ import { positionals, flagValue, hasFlag, intFlag, dateFlag, renderTable } from 
 export async function main(argv: string[]): Promise<void> {
   const [app] = positionals(argv);
   if (!app) {
-    throw new Error("Usage: mesh-usage app <app> [--days N] [--date YYYY-MM-DD] [--json]");
+    throw new Error("Usage: mesh-cli app <app> [--days N] [--date YYYY-MM-DD] [--json]");
   }
 
   const endDate = dateFlag(argv, "date", utcDateString());

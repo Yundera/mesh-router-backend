@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# Usage-KPI CLI shim — dispatches to dist/cli/index.js subcommands.
+# Installed at /usr/local/bin/mesh-cli by the Dockerfile. See src/cli/index.ts
+# for the dispatcher and src/scripts/usage-*.ts for the command implementations.
+# `mesh-cli` with no args lists available commands. Run inside the container,
+# e.g. `docker compose exec mesh-router-backend mesh-cli summary`.
+exec node /app/dist/cli/index.js "$@"

@@ -1,5 +1,5 @@
 /**
- * mesh-usage reset-link <email> [--json]
+ * mesh-cli reset-link <email> [--json]
  *
  * Generate a Firebase password-reset link for a user and print it, WITHOUT
  * sending any email. Use this when the reset mail is stuck in the mail queue
@@ -23,7 +23,7 @@ export async function main(argv: string[]): Promise<void> {
   const json = hasFlag(argv, "json");
 
   if (!email) {
-    throw new Error("usage: mesh-usage reset-link <email> [--json]");
+    throw new Error("usage: mesh-cli reset-link <email> [--json]");
   }
 
   initializeFb();

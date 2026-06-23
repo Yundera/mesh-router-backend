@@ -28,8 +28,8 @@ RUN apt-get update \
  && rm -rf /var/lib/apt/lists/*
 COPY --from=prod-deps /app/node_modules /app/node_modules
 COPY --from=build /app/dist /app/dist
-# mesh-usage admin CLI shim (DAU KPIs) — see src/cli/index.ts
-COPY ./bin/mesh-usage /usr/local/bin/mesh-usage
-RUN chmod +x /usr/local/bin/mesh-usage
+# mesh-cli admin CLI shim (DAU KPIs) — see src/cli/index.ts
+COPY ./bin/mesh-cli /usr/local/bin/mesh-cli
+RUN chmod +x /usr/local/bin/mesh-cli
 EXPOSE 8192
 CMD [ "node", "/app/dist" ]

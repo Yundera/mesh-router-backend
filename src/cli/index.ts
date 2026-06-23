@@ -1,13 +1,13 @@
 /**
- * mesh-usage CLI entrypoint — wired up at /usr/local/bin/mesh-usage in the image
+ * mesh-cli CLI entrypoint — wired up at /usr/local/bin/mesh-cli in the image
  * (see Dockerfile). Each subcommand is implemented in src/scripts/usage-*.ts and
  * exports an async `main(argv)`. Reads the usage:* daily buckets directly from
  * Redis (same REDIS_URL the backend uses), so it must run inside the container:
  *
- *   docker compose exec mesh-router-backend mesh-usage            # help
- *   docker compose exec mesh-router-backend mesh-usage summary
- *   docker compose exec mesh-router-backend mesh-usage app nextcloud --days 7
- *   docker compose exec mesh-router-backend mesh-usage top --top 10 --json
+ *   docker compose exec mesh-router-backend mesh-cli            # help
+ *   docker compose exec mesh-router-backend mesh-cli summary
+ *   docker compose exec mesh-router-backend mesh-cli app nextcloud --days 7
+ *   docker compose exec mesh-router-backend mesh-cli top --top 10 --json
  */
 
 import { main as usageApp } from "../scripts/usage-app.js";
@@ -45,10 +45,10 @@ const COMMANDS: Command[] = [
 ];
 
 function printHelp(): void {
-  console.log("Usage: mesh-usage <command> [args...]");
+  console.log("Usage: mesh-cli <command> [args...]");
   console.log("");
   console.log("App-usage (DAU) KPIs for mesh-router. Run inside the container,");
-  console.log("e.g. `docker compose exec mesh-router-backend mesh-usage summary`.");
+  console.log("e.g. `docker compose exec mesh-router-backend mesh-cli summary`.");
   console.log("");
   console.log("Commands:");
   const width = Math.max(...COMMANDS.map((c) => c.name.length));
@@ -67,7 +67,7 @@ async function dispatch(argv: string[]): Promise<number> {
   }
   const cmd = COMMANDS.find((c) => c.name === head);
   if (!cmd) {
-    console.error(`mesh-usage: unknown command '${head}'\n`);
+    console.error(`mesh-cli: unknown command '${head}'\n`);
     printHelp();
     return 1;
   }

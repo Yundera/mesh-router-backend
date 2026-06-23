@@ -1,5 +1,5 @@
 /**
- * mesh-usage top [--date YYYY-MM-DD] [--days N] [--top N] [--json]
+ * mesh-cli top [--date YYYY-MM-DD] [--days N] [--top N] [--json]
  *
  * Apps ranked by distinct active users over a window (default: 1 day = DAU).
  */

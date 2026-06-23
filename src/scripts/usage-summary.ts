@@ -1,5 +1,5 @@
 /**
- * mesh-usage summary [--date YYYY-MM-DD] [--days N] [--json]
+ * mesh-cli summary [--date YYYY-MM-DD] [--days N] [--json]
  *
  * Global headline: distinct active users + the top apps for the window
  * (default: 1 day = DAU).
