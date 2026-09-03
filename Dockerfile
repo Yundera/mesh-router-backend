@@ -1,20 +1,28 @@
-# Pinned to Node 20: node-fetch 2.x (via firebase-admin → google-auth-library →
-# gaxios 6 → node-fetch 2.7) throws "Premature close" minting Google OAuth2
-# access tokens on Node 22/24. The unpinned `node:lts` floated to 24 and broke
-# admin.auth() token mints (reset-link CLI + dashboard password reset). Node 20
-# is verified working with the same node_modules. Revisit when firebase-admin
-# moves to gaxios 7 (native fetch).
-FROM node:20 AS base
+# Was pinned to Node 20: node-fetch 2.x (via firebase-admin → google-auth-library
+# → gaxios 6 → node-fetch 2.7) threw "Premature close" minting Google OAuth2
+# access tokens on Node 22/24, which broke admin.auth() token mints (reset-link
+# CLI + dashboard password reset). The pin is lifted because node-fetch 2 is now
+# gone from the image entirely: firebase-admin 14 (modular API) pulls firestore 8
+# → google-gax 5 → google-auth-library 10 → gaxios 7 → native fetch, and the last
+# node-fetch 2 holdout, the unused optional @google-cloud/storage, is excluded in
+# pnpm-workspace.yaml. Verify with:
+#   pnpm why node-fetch   # must show only 3.x
+FROM node:24 AS base
 ENV PNPM_HOME="/pnpm"
 ENV PATH="$PNPM_HOME:$PATH"
-RUN corepack enable
-#same version as the one in CasaOS-UI package.json
-RUN corepack prepare pnpm@9.9.0 --activate
+
+# Install corepack and enable it
+RUN npm install -g corepack@latest && corepack enable
 
 WORKDIR /app
 COPY package.json /app
 COPY pnpm-lock.yaml /app
 COPY .npmrc /app
+COPY pnpm-workspace.yaml /app
+
+# Install the exact pnpm version specified in package.json
+# (kept in sync with the version in CasaOS-UI package.json)
+RUN corepack install
 
 FROM base AS prod-deps
 RUN --mount=type=cache,id=pnpm,target=/pnpm/store pnpm install --prod --frozen-lockfile

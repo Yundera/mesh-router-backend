@@ -17,7 +17,7 @@
     "dotenv": "^17.2.3",
     "express": "^5.2.1",
     "firebase": "^12.7.0",
-    "firebase-admin": "^13.6.0",
+    "firebase-admin": "^14.3.0",
     "ioredis": "^5.4.1",
     "libsodium-wrappers": "^0.8.0",
     "multiformats": "^13.4.2",
@@ -41,5 +41,5 @@
     "supertest": "7.2.2",
     "tsc-watch": "^6.2.1"
   },
-  "packageManager": "pnpm@9.9.0+sha512.60c18acd138bff695d339be6ad13f7e936eea6745660d4cc4a776d5247c540d0edee1a563695c183a66eb917ef88f2b4feb1fc25f32a7adcadc7aaf3438e99c1"
+  "packageManager": "pnpm@11.25.0+sha512.5cde925b4f075f725eb71fbae18a42ffe784524789f19b61c731cb8721ec28aaee160e01a8d5af4fedb2a42cdbf300efe23db356b0d4a17b4d63e11f8ab7c956"
 }

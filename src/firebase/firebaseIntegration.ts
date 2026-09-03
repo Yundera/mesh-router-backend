@@ -1,5 +1,5 @@
 //https://firebase.google.com/docs/admin/setup/#initialize_the_sdk_in_non-google_environments
-import admin from "firebase-admin";
+import { initializeApp, cert, type ServiceAccount } from "firebase-admin/app";
 import * as fs from 'fs';
 import * as path from 'path';
 import { fileURLToPath } from 'url';
@@ -17,7 +17,7 @@ function getServiceAccountPath(): string {
   return path.join(__dirname, '../../config/serviceAccount.json');
 }
 
-let serviceAccount: admin.ServiceAccount | null = null;
+let serviceAccount: ServiceAccount | null = null;
 const filePath = getServiceAccountPath();
 
 if (fs.existsSync(filePath)) {
@@ -32,7 +32,7 @@ export function initializeFb() {
     console.error('[Firebase] Cannot initialize - no service account configured');
     throw new Error('Firebase service account not configured. See warnings above.');
   }
-  admin.initializeApp({
-    credential: admin.credential.cert(serviceAccount)
+  initializeApp({
+    credential: cert(serviceAccount)
   });
 }

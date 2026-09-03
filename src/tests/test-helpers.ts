@@ -1,5 +1,5 @@
 import { generateKeyPair, sign } from "../library/KeyLib.js";
-import admin from "firebase-admin";
+import { getFirestore } from "firebase-admin/firestore";
 import { NSL_ROUTER_COLLECTION, NSLRouterData } from "../DataBaseDTO/DataBaseNSLRouter.js";
 import { getRedisClient } from "../redis/redisClient.js";
 import { deleteRoutes, getRoutes, getRoutesTTL, Route } from "../services/Routes.js";
@@ -32,7 +32,7 @@ export async function createTestUser(userId: string): Promise<{ publicKey: strin
     publicKey: keyPair.pub,
   };
 
-  await admin.firestore().collection(NSL_ROUTER_COLLECTION).doc(userId).set(userData);
+  await getFirestore().collection(NSL_ROUTER_COLLECTION).doc(userId).set(userData);
 
   return {
     publicKey: keyPair.pub,
@@ -51,19 +51,19 @@ export async function signMessage(privateKey: string, message: string): Promise<
  * Delete a test user from Firebase
  */
 export async function deleteTestUser(userId: string): Promise<void> {
-  await admin.firestore().collection(NSL_ROUTER_COLLECTION).doc(userId).delete();
+  await getFirestore().collection(NSL_ROUTER_COLLECTION).doc(userId).delete();
 }
 
 /**
  * Clean up all test users (those with TEST_USER_PREFIX)
  */
 export async function cleanupAllTestUsers(): Promise<void> {
-  const snapshot = await admin.firestore()
+  const snapshot = await getFirestore()
     .collection(NSL_ROUTER_COLLECTION)
     .where("domainName", ">=", "")
     .get();
 
-  const batch = admin.firestore().batch();
+  const batch = getFirestore().batch();
   let count = 0;
 
   snapshot.docs.forEach((doc) => {
@@ -83,7 +83,7 @@ export async function cleanupAllTestUsers(): Promise<void> {
  * Get test user data from Firebase
  */
 export async function getTestUserData(userId: string): Promise<NSLRouterData | null> {
-  const doc = await admin.firestore().collection(NSL_ROUTER_COLLECTION).doc(userId).get();
+  const doc = await getFirestore().collection(NSL_ROUTER_COLLECTION).doc(userId).get();
   return doc.exists ? (doc.data() as NSLRouterData) : null;
 }
 

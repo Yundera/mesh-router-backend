@@ -11,7 +11,7 @@ import {runCleanup} from "./DomainCleanup.js";
 import {probeCandidates, checkRateLimit, PROBE_LIMITS} from "./Probe.js";
 import {recordUsage, UsageEvent, MAX_USAGE_EVENTS_PER_REQUEST} from "./Usage.js";
 import {verifyEmailCredential, sendUserEmail, EmailError, EmailSendRequest} from "./Email.js";
-import admin from "firebase-admin";
+import { getAuth } from "firebase-admin/auth";
 
 /**
  * Logs authentication failures with relevant context for security monitoring.
@@ -137,7 +137,7 @@ export function routerAPI(expressApp: express.Application) {
       // Firebase Auth is the authoritative source of the account email.
       let email: string | undefined;
       try {
-        const userRecord = await admin.auth().getUser(userid);
+        const userRecord = await getAuth().getUser(userid);
         email = userRecord.email;
       } catch (e) {
         return res.status(404).json({ error: "No Firebase user for this id." });

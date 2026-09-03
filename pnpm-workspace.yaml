@@ -1,0 +1,24 @@
+# pnpm 11 no longer reads the "pnpm" field of package.json, nor pnpm-specific
+# keys from .npmrc — settings live here.
+#
+# shamefullyHoist mirrors `shamefully-hoist=true` in .npmrc, which pnpm 11
+# ignores *silently*: without it the image ships only the direct dependencies
+# in node_modules and transitive requires fail at runtime.
+shamefullyHoist: true
+
+# Dependency build scripts are blocked by default since pnpm 10. These ran under
+# the previous pnpm 9 pin, so keep them approved to leave the installed tree
+# unchanged. `pnpm approve-builds` maintains this map.
+allowBuilds:
+  '@firebase/util': true
+  protobufjs: true
+
+# firebase-admin declares @google-cloud/storage as an optional dependency, and
+# its ^7 range is the last thing in the tree pulling google-auth-library 9 ->
+# gaxios 6 -> node-fetch 2.7 — the stack whose "Premature close" on Node 22/24
+# forced the old Node 20 pin (see Dockerfile). This service never touches Cloud
+# Storage (no getStorage/admin.storage() anywhere), so drop it entirely.
+# Removing this line brings node-fetch 2 back; adding a storage call means
+# removing it AND re-testing token minting on Node 24.
+ignoredOptionalDependencies:
+  - '@google-cloud/storage'

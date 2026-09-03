@@ -1,5 +1,5 @@
 // Authentication middleware
-import admin from "firebase-admin";
+import { getAuth } from "firebase-admin/auth";
 import type { Request, Response, NextFunction } from "express";
 
 export interface AuthUserRequest extends Request {
@@ -62,7 +62,7 @@ export const authenticate = async (
     const idToken = authHeader.split("Bearer ")[1];
 
     try {
-      const decodedToken = await admin.auth().verifyIdToken(idToken);
+      const decodedToken = await getAuth().verifyIdToken(idToken);
       req.user = { uid: decodedToken.uid };
       next();
     } catch (firebaseError) {

@@ -14,7 +14,7 @@
  * project (service account) as the dashboard, so the link is valid for that
  * user pool.
  */
-import admin from "firebase-admin";
+import { getAuth } from "firebase-admin/auth";
 import { initializeFb } from "../firebase/firebaseIntegration.js";
 import { positionals, hasFlag } from "../cli/format.js";
 
@@ -30,7 +30,7 @@ export async function main(argv: string[]): Promise<void> {
 
   let link: string;
   try {
-    link = await admin.auth().generatePasswordResetLink(email);
+    link = await getAuth().generatePasswordResetLink(email);
   } catch (err: any) {
     if (err?.code === "auth/user-not-found") {
       throw new Error(`no Firebase user with email '${email}'`);

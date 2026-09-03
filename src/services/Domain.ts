@@ -1,5 +1,5 @@
 import {NSL_ROUTER_COLLECTION, NSLRouterData} from "../DataBaseDTO/DataBaseNSLRouter.js";
-import admin from "firebase-admin";
+import { getFirestore, FieldValue } from "firebase-admin/firestore";
 
 //https://www.nic.ad.jp/timeline/en/20th/appendix1.html#:~:text=Format%20of%20a%20domain%20name,a%20maximum%20of%20253%20characters.
 
@@ -49,7 +49,7 @@ export async function getDomain(domain: string): Promise<{ uid: string, domain: 
     throw new Error(validation.message);
   }
 
-  const nslRouterCollection = admin.firestore().collection(NSL_ROUTER_COLLECTION);
+  const nslRouterCollection = getFirestore().collection(NSL_ROUTER_COLLECTION);
   const querySnapshot = await nslRouterCollection.where('domainName', '==', domain).get();
 
   if (querySnapshot.empty) {
@@ -100,7 +100,7 @@ export async function getUserDomain(userId: string): Promise<NSLRouterData | nul
     throw new Error("User ID is required.");
   }
 
-  const userDoc = await admin.firestore().collection(NSL_ROUTER_COLLECTION).doc(userId).get();
+  const userDoc = await getFirestore().collection(NSL_ROUTER_COLLECTION).doc(userId).get();
   return userDoc.exists ? userDoc.data() as NSLRouterData : null;
 }
 
@@ -144,7 +144,7 @@ export async function updateUserDomain(
     throw new Error("No valid data provided for update");
   }
 
-  const userDocRef = admin.firestore().collection(NSL_ROUTER_COLLECTION).doc(userId);
+  const userDocRef = getFirestore().collection(NSL_ROUTER_COLLECTION).doc(userId);
   await userDocRef.set(cleanedData, { merge: true });
 }
 
@@ -157,7 +157,7 @@ export async function deleteUserDomain(userId: string): Promise<void> {
     throw new Error("User ID is required.");
   }
 
-  await admin.firestore().collection(NSL_ROUTER_COLLECTION).doc(userId).delete();
+  await getFirestore().collection(NSL_ROUTER_COLLECTION).doc(userId).delete();
 }
 
 /**
@@ -172,7 +172,7 @@ export async function updateLastRouteRegistration(userId: string): Promise<strin
   }
 
   const lastRouteRegistration = new Date().toISOString();
-  const userDocRef = admin.firestore().collection(NSL_ROUTER_COLLECTION).doc(userId);
+  const userDocRef = getFirestore().collection(NSL_ROUTER_COLLECTION).doc(userId);
   await userDocRef.update({ lastRouteRegistration });
 
   return lastRouteRegistration;
@@ -189,10 +189,10 @@ export async function clearDomainAssignment(userId: string): Promise<void> {
     throw new Error("User ID is required.");
   }
 
-  const userDocRef = admin.firestore().collection(NSL_ROUTER_COLLECTION).doc(userId);
+  const userDocRef = getFirestore().collection(NSL_ROUTER_COLLECTION).doc(userId);
   await userDocRef.update({
-    domainName: admin.firestore.FieldValue.delete(),
-    publicKey: admin.firestore.FieldValue.delete(),
+    domainName: FieldValue.delete(),
+    publicKey: FieldValue.delete(),
   });
 }
 
@@ -202,7 +202,7 @@ export async function clearDomainAssignment(userId: string): Promise<void> {
  * @returns Array of user documents with their IDs
  */
 export async function getAllUserDomains(): Promise<Array<{ userId: string; data: NSLRouterData }>> {
-  const snapshot = await admin.firestore().collection(NSL_ROUTER_COLLECTION).get();
+  const snapshot = await getFirestore().collection(NSL_ROUTER_COLLECTION).get();
   return snapshot.docs
     .filter(doc => doc.data().domainName) // Only return docs with a domain
     .map(doc => ({
