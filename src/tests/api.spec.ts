@@ -59,6 +59,7 @@ describe("Domain API", () => {
 
       expect(response.body.available).to.equal(true);
       expect(response.body.message).to.equal("Domain name is available.");
+      expect(response.body.reason).to.equal(undefined);
     });
 
     it("should return unavailable for existing domain", async () => {
@@ -70,6 +71,7 @@ describe("Domain API", () => {
         .expect(209); // Note: Using existing status code behavior
 
       expect(response.body.available).to.equal(false);
+      expect(response.body.reason).to.equal("taken");
     });
 
     it("should return unavailable for reserved domains", async () => {
@@ -79,6 +81,7 @@ describe("Domain API", () => {
 
       expect(response.body.available).to.equal(false);
       expect(response.body.message).to.equal("Domain name is not available.");
+      expect(response.body.reason).to.equal("reserved");
     });
 
     it("should return unavailable for www reserved domain", async () => {
@@ -87,6 +90,7 @@ describe("Domain API", () => {
         .expect(209);
 
       expect(response.body.available).to.equal(false);
+      expect(response.body.reason).to.equal("reserved");
     });
 
     it("should reject invalid domain names", async () => {
@@ -96,6 +100,7 @@ describe("Domain API", () => {
 
       expect(response.body.available).to.equal(false);
       expect(response.body.message).to.include("lowercase letters and numbers");
+      expect(response.body.reason).to.equal("invalid");
     });
 
     it("should reject domains with uppercase", async () => {
@@ -104,6 +109,7 @@ describe("Domain API", () => {
         .expect(209);
 
       expect(response.body.available).to.equal(false);
+      expect(response.body.reason).to.equal("invalid");
     });
 
     it("should reject domains longer than 63 characters", async () => {
@@ -115,6 +121,7 @@ describe("Domain API", () => {
 
       expect(response.body.available).to.equal(false);
       expect(response.body.message).to.include("63 characters");
+      expect(response.body.reason).to.equal("invalid");
     });
   });
 

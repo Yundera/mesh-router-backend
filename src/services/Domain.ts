@@ -64,30 +64,33 @@ export async function getDomain(domain: string): Promise<{ uid: string, domain: 
 
 const RESERVED_DOMAINS = ["root", "app", "www"];
 
+/** Why a name is not available, so clients don't have to parse `message`. */
+export type DomainUnavailableReason = "invalid" | "reserved" | "taken";
+
 /**
  * Checks if a domain name is available.
  * @param domain - The domain name to check
- * @returns Promise<{ available: boolean, message: string }>
+ * @returns Promise<{ available: boolean, message: string, reason?: DomainUnavailableReason }> - `reason` is set only when unavailable
  */
-export async function checkDomainAvailability(domain: string): Promise<{ available: boolean, message: string }> {
+export async function checkDomainAvailability(domain: string): Promise<{ available: boolean, message: string, reason?: DomainUnavailableReason }> {
   if (!domain) {
     throw new Error("Domain name is required.");
   }
 
   const validation = validateDomainName(domain);
   if (!validation.isValid) {
-    return { available: false, message: validation.message };
+    return { available: false, message: validation.message, reason: "invalid" };
   }
 
   if (RESERVED_DOMAINS.includes(domain)) {
-    return { available: false, message: "Domain name is not available." };
+    return { available: false, message: "Domain name is not available.", reason: "reserved" };
   }
 
   const existingDomain = await getDomain(domain);
-  return {
-    available: existingDomain === null,
-    message: existingDomain === null ? "Domain name is available." : "Domain name is not available."
-  };
+  if (existingDomain !== null) {
+    return { available: false, message: "Domain name is not available.", reason: "taken" };
+  }
+  return { available: true, message: "Domain name is available." };
 }
 
 /**
