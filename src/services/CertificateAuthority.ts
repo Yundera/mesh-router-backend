@@ -14,7 +14,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { fileURLToPath } from 'url';
 import forge from 'node-forge';
-import { getServerDomain } from '../configuration/config.js';
+import { getCertExtraSans, getServerDomain } from '../configuration/config.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -247,7 +247,8 @@ export async function signCSR(
   // This enables HTTPS connections via:
   // 1. Gateway-routed traffic (SNI matching *.serverDomain)
   // 2. CF Worker direct access (*.nip.io)
-  // 3. Direct IP access (https://[IP])
+  // 3. Names the deployment adds (CERT_EXTRA_SANS)
+  // 4. Direct IP access (https://[IP])
   const altNames: Array<{type: number; value?: string; ip?: string}> = [];
 
   // 1. Wildcard for serverDomain (gateway-routed traffic)
@@ -265,7 +266,13 @@ export async function signCSR(
   altNames.push({ type: 2, value: '*.nip.io' });  // DNS wildcard
   console.log('[CA]   SAN: *.nip.io');
 
-  // 3. Raw IP SAN (direct IP access via https://[IP])
+  // 3. Deployment-specific names (CERT_EXTRA_SANS), e.g. *.ip.inojob.com
+  for (const name of getCertExtraSans()) {
+    altNames.push({ type: 2, value: name });
+    console.log(`[CA]   SAN: ${name}`);
+  }
+
+  // 4. Raw IP SAN (direct IP access via https://[IP])
   if (publicIp) {
     altNames.push({ type: 7, ip: publicIp });  // IP address
     console.log(`[CA]   SAN: IP ${publicIp}`);

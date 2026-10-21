@@ -12,6 +12,19 @@ export function getServerDomain(): string {
 }
 
 /**
+ * Returns extra DNS names every box certificate carries as SANs, from CERT_EXTRA_SANS
+ * (comma-separated, e.g. "*.ip.inojob.com"). Empty when unset.
+ * For names a deployment's boxes answer on beyond *.SERVER_DOMAIN and *.nip.io — the
+ * ip.<zone> nameserver's subzone — so each deployment states its own without a code change.
+ */
+export function getCertExtraSans(): string[] {
+  return (process.env.CERT_EXTRA_SANS || "")
+    .split(",")
+    .map((name) => name.trim())
+    .filter((name) => name !== "");
+}
+
+/**
  * Returns the SendGrid API key used by the per-user mail relay (POST /email/send),
  * or undefined if mail sending is not configured. When undefined, sends are skipped
  * (logged) rather than failing, so non-mail deployments and local dev still work.
