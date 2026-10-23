@@ -10,6 +10,7 @@ import {logDomainAssigned} from "./DomainLogger.js";
 import {runCleanup} from "./DomainCleanup.js";
 import {probeCandidates, checkRateLimit, PROBE_LIMITS} from "./Probe.js";
 import {recordUsage, UsageEvent, MAX_USAGE_EVENTS_PER_REQUEST} from "./Usage.js";
+import {noteRoutes} from "./DnsZones.js";
 import {verifyEmailCredential, sendUserEmail, EmailError, EmailSendRequest} from "./Email.js";
 import { getAuth } from "firebase-admin/auth";
 
@@ -383,6 +384,9 @@ export function routerAPI(expressApp: express.Application) {
 
       // Update lastRouteRegistration in Firestore
       await updateLastRouteRegistration(userid);
+
+      // ip.<zone> allowlist: a failing nameserver primary must not fail the registration
+      noteRoutes(routesToStore).catch((e) => console.error(`[dns] [${userid}] allowlist update failed: ${e.message ?? e}`));
 
       return res.status(200).json({
         message: "Routes registered successfully.",

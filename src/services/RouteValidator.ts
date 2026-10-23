@@ -1,5 +1,8 @@
 import { Route } from "./Routes.js";
+import http from 'http';
 import https from 'https';
+import { LookupFunction } from 'net';
+import { getDnsIpZone } from "../configuration/config.js";
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -58,7 +61,8 @@ function validateWithHttps(
   url: string,
   hostname: string,
   port: number,
-  startTime: number
+  startTime: number,
+  lookup?: LookupFunction
 ): Promise<ValidationResult> {
   const makeRequest = (agent?: https.Agent): Promise<ValidationResult> =>
     new Promise((resolve) => {
@@ -69,6 +73,7 @@ function validateWithHttps(
         method: 'HEAD',
         timeout: VALIDATION_TIMEOUT,
         ...(agent ? { agent } : {}),
+        ...(lookup ? { lookup } : {}),
       };
 
       const req = https.request(options, () => {
@@ -97,6 +102,55 @@ function validateWithHttps(
   return Promise.all(attempts).then((results) => {
     return results.find((r) => r.valid) || results[0];
   });
+}
+
+/**
+ * Validate a plain-HTTP endpoint at a fixed address (see pinnedLookup). fetch can't
+ * take a custom lookup, so this uses http.request; any response means reachable.
+ */
+function validateWithHttpPinned(
+  url: string,
+  hostname: string,
+  port: number,
+  startTime: number,
+  lookup: LookupFunction
+): Promise<ValidationResult> {
+  return new Promise((resolve) => {
+    const req = http.request(
+      { hostname, port, path: '/', method: 'HEAD', timeout: VALIDATION_TIMEOUT, lookup },
+      () => resolve({ valid: true, responseTime: Date.now() - startTime, url })
+    );
+    req.on('error', (err) => resolve(handleFetchError(err, url)));
+    req.on('timeout', () => {
+      req.destroy();
+      resolve({ valid: false, error: 'Connection timeout - host unreachable', url });
+    });
+    req.end();
+  });
+}
+
+/**
+ * A DNS lookup that always answers `ip`. Used for domain routes in our own ip.<zone>
+ * (DNS_IP_ZONE): that zone answers only IPs already accepted from an agent, so
+ * resolving the name of a new box's route would fail before its first acceptance.
+ * The name encodes route.ip; connect there and keep the name for SNI/Host.
+ */
+function pinnedLookup(ip: string): LookupFunction {
+  const family = ip.includes(':') ? 6 : 4;
+  return ((_hostname: string, options: { all?: boolean }, callback: (...args: unknown[]) => void) => {
+    if (options?.all) {
+      callback(null, [{ address: ip, family }]);
+    } else {
+      callback(null, ip, family);
+    }
+  }) as LookupFunction;
+}
+
+/** True for a domain route inside DNS_IP_ZONE. */
+function isOwnIpZoneDomain(route: Route): boolean {
+  const zone = getDnsIpZone();
+  return !!zone && route.type === 'domain' && !!route.domain
+    && route.domain.toLowerCase().replace(/\.$/, '').endsWith(`.${zone}`);
 }
 
 /**
@@ -170,8 +224,14 @@ export async function validateRoute(route: Route): Promise<ValidationResult> {
   const hostForUrl = targetHost.includes(':') ? `[${targetHost}]` : targetHost;
   const url = `${targetScheme}://${hostForUrl}:${route.port}/`;
 
+  const lookup = isOwnIpZoneDomain(route) ? pinnedLookup(route.ip) : undefined;
+
   if (targetScheme === 'https') {
-    return validateWithHttps(url, targetHost, route.port, startTime);
+    return validateWithHttps(url, targetHost, route.port, startTime, lookup);
+  }
+
+  if (lookup) {
+    return validateWithHttpPinned(url, targetHost, route.port, startTime, lookup);
   }
 
   // HTTP validation using fetch (don't follow redirects — a 3xx still means the route is reachable)

@@ -7,6 +7,7 @@ import {initializeCA} from "./services/CertificateAuthority.js";
 import {routerAPI} from "./services/RouterAPI.js";
 import {runCleanup} from "./services/DomainCleanup.js";
 import {getCleanupCronSchedule} from "./configuration/config.js";
+import {startDnsReconciler} from "./services/DnsZones.js";
 
 import 'dotenv/config';
 
@@ -32,6 +33,9 @@ expressApp.listen(port, async () => {
         }
     });
     console.log(`Domain cleanup scheduled: ${cronSchedule}`);
+
+    // Nameserver hidden primary (off unless PDNS_API_URL and DNS_IP_ZONE are set)
+    startDnsReconciler();
 
     console.log('Listening on ' + port);
 });

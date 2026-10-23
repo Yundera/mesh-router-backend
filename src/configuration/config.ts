@@ -121,3 +121,57 @@ export function getUsageRetentionSeconds(): number {
   }
   return DEFAULT_USAGE_RETENTION_SECONDS;
 }
+
+/**
+ * Default grace period for the ip.<zone> allowlist in seconds (6 hours): an IP stays
+ * answerable this long after its agent last registered it.
+ */
+const DEFAULT_DNS_ALLOW_GRACE_SECONDS = 6 * 60 * 60; // 21600
+
+/**
+ * Returns the PowerDNS hidden primary's API base URL (e.g. "http://pdns-primary:8081"),
+ * or undefined when unset. Unset disables every DNS write (DnsZones.ts).
+ */
+export function getPdnsApiUrl(): string | undefined {
+  return process.env.PDNS_API_URL?.replace(/\/+$/, "") || undefined;
+}
+
+/**
+ * Returns the PowerDNS API key (X-API-Key header).
+ */
+export function getPdnsApiKey(): string {
+  return process.env.PDNS_API_KEY || "";
+}
+
+/**
+ * Returns the ip.<zone> name served by the nameserver secondaries (e.g. "ip.inojob.com"),
+ * without trailing dot, or undefined when unset. Its allowlist zone is
+ * allow.<ip-zone>.invalid (mesh-router-nameserver deploy/secondary/lua/ipname.lua).
+ */
+export function getDnsIpZone(): string | undefined {
+  return process.env.DNS_IP_ZONE?.replace(/\.+$/, "").toLowerCase() || undefined;
+}
+
+/**
+ * Returns the catalog (RFC 9432) producer zone the backend's zones are members of, so
+ * the secondaries pick them up. Default catalog.<SERVER_DOMAIN>.invalid.
+ */
+export function getDnsCatalogZone(): string {
+  const name = process.env.DNS_CATALOG_ZONE || `catalog.${getServerDomain()}.invalid`;
+  return name.replace(/\.+$/, "").toLowerCase();
+}
+
+/**
+ * Returns the ip.<zone> allowlist grace period from environment or default.
+ * @returns Grace in seconds
+ */
+export function getDnsAllowGraceSeconds(): number {
+  const envValue = process.env.DNS_ALLOW_GRACE_SECONDS;
+  if (envValue) {
+    const parsed = parseInt(envValue, 10);
+    if (!isNaN(parsed) && parsed > 0) {
+      return parsed;
+    }
+  }
+  return DEFAULT_DNS_ALLOW_GRACE_SECONDS;
+}
