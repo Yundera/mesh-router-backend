@@ -17,6 +17,9 @@ import {
   TEST_SERVER_DOMAIN,
 } from "./test-helpers.js";
 import type { Application } from "express";
+import { getFirestore } from "firebase-admin/firestore";
+import { NSL_ROUTER_COLLECTION } from "../DataBaseDTO/DataBaseNSLRouter.js";
+import { updateUserDomain } from "../services/Domain.js";
 
 describe("Domain API", () => {
   let app: Application;
@@ -91,6 +94,17 @@ describe("Domain API", () => {
 
       expect(response.body.available).to.equal(false);
       expect(response.body.reason).to.equal("reserved");
+    });
+
+    it("should return unavailable for zone labels (ns1, ip)", async () => {
+      for (const label of ["ns1", "ip"]) {
+        const response = await request(app)
+          .get(`/available/${label}`)
+          .expect(209);
+
+        expect(response.body.available).to.equal(false);
+        expect(response.body.reason).to.equal("reserved");
+      }
     });
 
     it("should reject invalid domain names", async () => {
@@ -176,6 +190,29 @@ describe("Domain API", () => {
         .expect(200);
 
       expect(response.body.error).to.equal("unknown user");
+    });
+  });
+
+  // POST /domain needs a Firebase user token, so the rule is tested on updateUserDomain
+  describe("updateUserDomain reserved labels", () => {
+    it("should refuse a reserved label to a user who doesn't hold it", async () => {
+      let error: Error | null = null;
+      try {
+        await updateUserDomain(testUserId, { domainName: "ns1" });
+      } catch (e) {
+        error = e as Error;
+      }
+      expect(error?.message).to.equal("Domain name is not available.");
+      const stored = await getFirestore().collection(NSL_ROUTER_COLLECTION).doc(testUserId).get();
+      expect(stored.data()?.domainName).to.equal(testUserId);
+    });
+
+    it("should let the holder of a since-reserved label keep it", async () => {
+      // A transient staging doc holding a reserved label (the test user prefix keeps cleanup working)
+      await getFirestore().collection(NSL_ROUTER_COLLECTION).doc(testUserId).update({ domainName: "ns9" });
+      await updateUserDomain(testUserId, { domainName: "ns9", publicKey: testKeys.publicKey });
+      const stored = await getFirestore().collection(NSL_ROUTER_COLLECTION).doc(testUserId).get();
+      expect(stored.data()?.domainName).to.equal("ns9");
     });
   });
 });

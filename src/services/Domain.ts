@@ -62,7 +62,18 @@ export async function getDomain(domain: string): Promise<{ uid: string, domain: 
   }
 }
 
-const RESERVED_DOMAINS = ["root", "app", "www"];
+// Labels the zone itself needs (nameservers, ip.<zone>, gateway, mail, ACME, …).
+// Only names that pass validateDomainName are listed: dashed ones can't be users anyway.
+// Static-zone labels from the Cloudflare export get added here when the zone file exists.
+const RESERVED_DOMAINS = [
+  "root", "app", "www",
+  "ip", "ns", "ns1", "ns2", "ns3", "ns4", "ns5", "ns6", "ns7", "ns8", "ns9",
+  "gw", "gateway", "mail", "acme", "router", "s1", "s2", "dns", "entrypoint",
+];
+
+export function isReservedDomain(domain: string): boolean {
+  return RESERVED_DOMAINS.includes(domain);
+}
 
 /** Why a name is not available, so clients don't have to parse `message`. */
 export type DomainUnavailableReason = "invalid" | "reserved" | "taken";
@@ -82,7 +93,7 @@ export async function checkDomainAvailability(domain: string): Promise<{ availab
     return { available: false, message: validation.message, reason: "invalid" };
   }
 
-  if (RESERVED_DOMAINS.includes(domain)) {
+  if (isReservedDomain(domain)) {
     return { available: false, message: "Domain name is not available.", reason: "reserved" };
   }
 
@@ -134,6 +145,11 @@ export async function updateUserDomain(
 
     if (!isAvailable && !isOwned) {
       throw new Error(domain ? "Domain name is not owned by you." : "Domain name is already in use.");
+    }
+
+    // A holder of a name reserved after the fact keeps it (key rotation re-posts it)
+    if (!isOwned && isReservedDomain(domainName)) {
+      throw new Error("Domain name is not available.");
     }
   }
 
