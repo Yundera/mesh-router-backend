@@ -22,11 +22,22 @@ export interface Route {
 }
 
 /**
- * In-memory set of known route sources.
- * Populated as sources register - avoids expensive Redis KEYS scans.
- * Self-repopulates after restart as sources re-register (every 5 min).
+ * Known route sources: in memory, mirrored in a Redis set so a restarted backend
+ * finds every source at once instead of waiting for each box's next refresh (5 min).
+ * Avoids expensive Redis KEYS scans.
  */
+const SOURCES_KEY = "routes:sources";
 const knownSources = new Set<string>();
+let sourcesLoaded: Promise<void> | null = null;
+
+function loadKnownSources(): Promise<void> {
+  if (!sourcesLoaded) {
+    sourcesLoaded = getRedisClient().smembers(SOURCES_KEY)
+      .then(sources => { sources.forEach(s => knownSources.add(s)); })
+      .catch(err => { sourcesLoaded = null; throw err; });
+  }
+  return sourcesLoaded;
+}
 
 /**
  * Get the Redis key for a specific source's routes.
@@ -38,7 +49,8 @@ function getSourceRoutesKey(userId: string, source: string): string {
 /**
  * Get all source keys for a user based on known sources.
  */
-function getAllSourceKeys(userId: string): string[] {
+async function getAllSourceKeys(userId: string): Promise<string[]> {
+  await loadKnownSources();
   return Array.from(knownSources).map(s => getSourceRoutesKey(userId, s));
 }
 
@@ -91,6 +103,7 @@ export async function registerRoutes(userId: string, routes: Route[]): Promise<v
   for (const [source, sourceRoutes] of routesBySource) {
     const key = getSourceRoutesKey(userId, source);
     pipeline.setex(key, getRoutesTtl(), JSON.stringify(sourceRoutes));
+    pipeline.sadd(SOURCES_KEY, source);
   }
 
   await pipeline.exec();
@@ -112,7 +125,7 @@ export async function getRoutes(userId: string): Promise<Route[] | null> {
   }
 
   const redis = getRedisClient();
-  const keys = getAllSourceKeys(userId);
+  const keys = await getAllSourceKeys(userId);
 
   if (keys.length === 0) {
     return null;
@@ -148,7 +161,7 @@ export async function deleteRoutes(userId: string): Promise<void> {
   }
 
   const redis = getRedisClient();
-  const keys = getAllSourceKeys(userId);
+  const keys = await getAllSourceKeys(userId);
 
   // Delete all source keys (del ignores non-existent keys)
   if (keys.length > 0) {
@@ -169,7 +182,7 @@ export async function hasRoutes(userId: string): Promise<boolean> {
   }
 
   const redis = getRedisClient();
-  const keys = getAllSourceKeys(userId);
+  const keys = await getAllSourceKeys(userId);
 
   // No known sources means no routes possible
   if (keys.length === 0) {
@@ -195,7 +208,7 @@ export async function getRoutesTTL(userId: string): Promise<number> {
   }
 
   const redis = getRedisClient();
-  const keys = getAllSourceKeys(userId);
+  const keys = await getAllSourceKeys(userId);
 
   // No known sources means no routes possible
   if (keys.length === 0) {

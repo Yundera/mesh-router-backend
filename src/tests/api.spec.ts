@@ -20,6 +20,7 @@ import type { Application } from "express";
 import { getFirestore } from "firebase-admin/firestore";
 import { NSL_ROUTER_COLLECTION } from "../DataBaseDTO/DataBaseNSLRouter.js";
 import { updateUserDomain } from "../services/Domain.js";
+import { registerRoutes } from "../services/Routes.js";
 
 describe("Domain API", () => {
   let app: Application;
@@ -885,5 +886,24 @@ describe("Routes TTL", () => {
       // Tunnel's TTL should continue to decrease (not refreshed)
       expect(tunnelTtlAfter).to.be.lessThan(tunnelTtlBefore);
     });
+  });
+});
+
+describe("Route sources after a restart", () => {
+  const userId = generateTestUserId();
+
+  after(async () => {
+    await deleteTestUserRoutes(userId);
+  });
+
+  it("finds routes registered before the restart", async () => {
+    await registerRoutes(userId, [{ ip: "1.1.1.1", port: 443, priority: 1, source: "agent" }]);
+
+    // A second instance of the module starts with an empty in-memory source set, like a restarted backend
+    const spec = `../services/Routes.js?restart=${Date.now()}`;
+    const restarted = await import(spec) as typeof import("../services/Routes.js");
+
+    const routes = await restarted.getRoutes(userId);
+    expect(routes).to.deep.equal([{ ip: "1.1.1.1", port: 443, priority: 1, source: "agent" }]);
   });
 });
