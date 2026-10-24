@@ -5,7 +5,7 @@ import { AddressInfo } from "net";
 import forge from "node-forge";
 import { getRedisClient, closeRedisClient } from "../redis/redisClient.js";
 import { registerRoutes, deleteRoutes } from "../services/Routes.js";
-import { answer, desiredUserRRsets, dropUserZone, syncUser, userZoneName, ScopeUser } from "../services/DnsZones.js";
+import { answer, catchUpSerial, desiredUserRRsets, dropUserZone, syncUser, userZoneName, ScopeUser } from "../services/DnsZones.js";
 import { DnsProbeState, probeBox, saveProbeState } from "../services/DnsProbe.js";
 import * as pdns from "../services/PowerDns.js";
 
@@ -222,6 +222,40 @@ describe("DNS user zones on the PowerDNS primary", function () {
     expect(await records()).to.include(`immich.${zone()}. A ${GW.join(",")}`);
     await syncUser(user);
     expect((await records()).some((r) => r.startsWith("immich."))).to.equal(false);
+  });
+
+  it("removing a zone bumps the catalog serial so the secondaries drop it", async () => {
+    await syncUser(user);
+    const catalog = `catalog.${process.env.SERVER_DOMAIN}.invalid`;
+    const before = (await pdns.getZone(catalog))?.serial ?? 0;
+    expect(await dropUserZone(user.label)).to.equal(true);
+    expect((await pdns.getZone(catalog))?.serial).to.be.greaterThan(before);
+    expect(await pdns.getZone(zone())).to.equal(null);
+  });
+
+  it("lifts a zone's serial above a nameserver that is ahead (recreated primary)", async function () {
+    // PDNS_AHEAD_API / PDNS_AHEAD_DNS: a second PowerDNS standing in for a secondary
+    // that still holds the zone at a higher serial
+    const api = process.env.PDNS_AHEAD_API;
+    const dnsAddr = process.env.PDNS_AHEAD_DNS;
+    if (!api || !dnsAddr) this.skip();
+    const name = pdns.fqdn(zone());
+    const h = { "X-API-Key": "testkey", "Content-Type": "application/json" };
+    const base = `${api}/api/v1/servers/localhost/zones`;
+    await fetch(`${base}/${name}`, { method: "DELETE", headers: h });
+    await fetch(base, { method: "POST", headers: h, body: JSON.stringify({ name, kind: "Primary", nameservers: ["ns1.example."] }) });
+    const soa = (await (await fetch(`${base}/${name}`, { headers: h })).json()).rrsets.find((r: any) => r.type === "SOA");
+    const ahead = soa.records[0].content.split(" ");
+    ahead[2] = "2099010150";
+    await fetch(`${base}/${name}`, { method: "PATCH", headers: h, body: JSON.stringify({ rrsets: [{ ...soa, changetype: "REPLACE", records: [{ content: ahead.join(" "), disabled: false }] }] }) });
+    try {
+      await syncUser(user);
+      expect(await catchUpSerial(zone(), [dnsAddr])).to.equal(true);
+      expect((await pdns.getZone(zone()))?.serial).to.be.greaterThan(2099010150);
+      expect(await catchUpSerial(zone(), [dnsAddr])).to.equal(false);
+    } finally {
+      await fetch(`${base}/${name}`, { method: "DELETE", headers: h });
+    }
   });
 
   it("dry run writes nothing", async () => {

@@ -111,6 +111,37 @@ export async function patchRRsets(zone: string, rrsets: PdnsRRset[]): Promise<vo
 }
 
 /**
+ * Bump the zone's SOA serial by one (PowerDNS may round it up to its own scheme).
+ * Needed for a producer catalog after a member zone is deleted: PowerDNS bumps the
+ * catalog's serial when a member is added, not when one is deleted, so without this
+ * the secondaries never re-transfer the catalog and keep serving the deleted zone.
+ */
+export async function bumpSerial(zone: string): Promise<void> {
+  await setSerialAtLeast(zone, null);
+}
+
+/**
+ * Raise the zone's SOA serial to at least `min` (null = current + 1). PowerDNS
+ * applies its SOA-EDIT-API on top, so the result can be a little higher. Returns
+ * false when the serial was already there.
+ */
+export async function setSerialAtLeast(zone: string, min: number | null): Promise<boolean> {
+  const z = await getZone(zone);
+  const soa = z?.rrsets.find((r) => r.type === "SOA");
+  if (!soa || soa.records.length === 0) throw new Error(`no SOA for ${fqdn(zone)}`);
+  const parts = soa.records[0].content.split(/\s+/);
+  const current = Number(parts[2]);
+  const target = min === null ? current + 1 : min;
+  if (current >= target) return false;
+  parts[2] = String(target);
+  await patchRRsets(zone, [{
+    name: soa.name, type: "SOA", ttl: soa.ttl, changetype: "REPLACE",
+    records: [{ content: parts.join(" "), disabled: false }],
+  }]);
+  return true;
+}
+
+/**
  * Send NOTIFY to the zone's secondaries. An API write sends none by itself: without
  * this the secondaries only pick changes up on their refresh cycle.
  */

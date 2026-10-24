@@ -173,7 +173,7 @@ describe("acme-dns API on the PowerDNS primary", function () {
       expect((await ref(uid).get()).data()?.dns?.force).to.equal("gateway");
       await put({ force: "auto" });
       await put({ force: "auto", host: "immich" });
-      expect((await ref(uid).get()).data()?.dns).to.deep.equal({ delegated: true, hostForce: {} });
+      expect((await ref(uid).get()).data()?.dns).to.deep.equal({ delegated: true });
     });
 
     it("refuses direct and other users", async () => {

@@ -144,6 +144,7 @@ async function ensureZones(created: string[]): Promise<pdns.PdnsZone> {
   if (!current) {
     await pdns.createZone(zone, "Primary", { catalog });
     created.push(zone);
+    await liftNewZone(zone);
     current = await pdns.getZone(zone);
     if (!current) throw new Error(`zone ${zone} missing right after creation`);
   }
@@ -405,6 +406,7 @@ async function runSyncUser(user: ScopeUser, dryRun: boolean): Promise<UserSyncRe
     const catalog = await ensureCatalog([]);
     await pdns.createZone(zone, "Primary", { catalog, nameservers: getDnsNsHosts() });
     created = true;
+    await liftNewZone(zone);
     current = await pdns.getZone(zone);
   }
   // what we manage: A and NS, and the challenge TXT; anything else is left alone
@@ -460,6 +462,12 @@ export function dropUserZone(label: string): Promise<boolean> {
     const zone = userZoneName(label);
     if (!(await pdns.getZone(zone))) return false;
     await pdns.deleteZone(zone);
+    // the catalog loses the member: make the secondaries re-transfer it and drop the zone
+    const catalog = getDnsCatalogZone();
+    if (await pdns.getZone(catalog)) {
+      await pdns.bumpSerial(catalog);
+      await pdns.notifyZone(catalog);
+    }
     console.log(`[dns] ${label}: zone ${zone} removed from the nameservers`);
     return true;
   });
@@ -562,6 +570,72 @@ export async function delegatedUsers(): Promise<ScopeUser[]> {
   return [...(await getScope()).values()].filter((u) => u.dns?.delegated);
 }
 
+// --- serials: the primary must stay ahead of the secondaries -----------------
+//
+// A zone the primary recreates (wiped volume, zone dropped and re-added) starts at
+// today's YYYYMMDD01, which can be BELOW what the secondaries still hold: they would
+// then ignore every change until the primary caught up. So the backend compares each
+// zone's serial with the nameservers' and lifts the primary above the highest.
+
+const SERIAL_CHECK_MS = 10 * 60 * 1000;
+let serialsCheckedAt = 0;
+
+/** Highest SOA serial the DNS_NS_HOSTS serve for `zone`, or null when none answers. */
+export async function nameserverSerial(zone: string, addresses?: string[]): Promise<number | null> {
+  const ips = addresses ?? (await Promise.all(getDnsNsHosts().map((h) => dnsp.resolve4(h).catch(() => [] as string[])))).flat();
+  let max: number | null = null;
+  for (const ip of ips) {
+    try {
+      const resolver = new dnsp.Resolver({ timeout: 2000, tries: 1 });
+      resolver.setServers([ip]);
+      const serial = (await resolver.resolveSoa(zone)).serial;
+      if (max === null || serial > max) max = serial;
+    } catch {
+      // that nameserver does not have the zone (yet) or is down
+    }
+  }
+  return max;
+}
+
+/**
+ * A zone the primary just created: start above whatever the nameservers still hold
+ * (a recreated zone). Called inside the write queue, so not serialized again.
+ */
+async function liftNewZone(zone: string): Promise<void> {
+  const theirs = await nameserverSerial(zone);
+  if (theirs !== null && await pdns.setSerialAtLeast(zone, theirs + 1)) {
+    console.log(`[dns] ${pdns.fqdn(zone)}: recreated, serial started above the nameservers' ${theirs}`);
+  }
+}
+
+/** Lift `zone`'s serial on the primary above every nameserver's, then NOTIFY. */
+export async function catchUpSerial(zone: string, addresses?: string[]): Promise<boolean> {
+  const theirs = await nameserverSerial(zone, addresses);
+  if (theirs === null) return false;
+  const lifted = await serialized(() => pdns.setSerialAtLeast(zone, theirs + 1));
+  if (lifted) {
+    await pdns.notifyZone(zone);
+    console.log(`[dns] ${pdns.fqdn(zone)}: serial lifted above the nameservers' ${theirs}`);
+  }
+  return lifted;
+}
+
+/** Every zone on the primary, at most once per SERIAL_CHECK_MS (or now with force). */
+export async function catchUpSerials(force = false): Promise<string[]> {
+  if (!force && Date.now() - serialsCheckedAt < SERIAL_CHECK_MS) return [];
+  serialsCheckedAt = Date.now();
+  const lifted: string[] = [];
+  for (const z of await pdns.listZones()) {
+    if (z.kind === "Producer") continue; // the catalog's serial is PowerDNS's own
+    try {
+      if (await catchUpSerial(z.name)) lifted.push(z.name);
+    } catch (e) {
+      console.error(`[dns] ${z.name}: serial check failed: ${(e as Error).message ?? e}`);
+    }
+  }
+  return lifted;
+}
+
 /** Run `fn` over `items`, at most `limit` at a time. */
 async function pool<T>(items: T[], limit: number, fn: (item: T) => Promise<void>): Promise<void> {
   const queue = [...items];
@@ -640,7 +714,12 @@ export async function setForce(
   const ref = getFirestore().collection(NSL_ROUTER_COLLECTION).doc(uid);
   const field = host ? `dns.hostForce.${host}` : "dns.force";
   await ref.update({ [field]: value === "auto" ? FieldValue.delete() : value });
-  const data = (await ref.get()).data() as NSLRouterData;
+  let data = (await ref.get()).data() as NSLRouterData;
+  // the last per-host override removed: drop the empty map too
+  if (data.dns?.hostForce && Object.keys(data.dns.hostForce).length === 0) {
+    await ref.update({ "dns.hostForce": FieldValue.delete() });
+    data = (await ref.get()).data() as NSLRouterData;
+  }
   // stored either way; written to a zone only where user zones run
   return { data, result: isUserZonesEnabled() ? await resyncUser(uid, data) : null };
 }
@@ -665,6 +744,7 @@ export function startDnsReconciler(intervalMs = 60_000): void {
       if (users) {
         await syncAllUsers().catch((e) => console.error(`[dns] user zones pass failed: ${e.message ?? e}`));
       }
+      await catchUpSerials().catch((e) => console.error(`[dns] serial check failed: ${e.message ?? e}`));
     } finally {
       running = false;
     }
