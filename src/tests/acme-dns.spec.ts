@@ -101,9 +101,9 @@ describe("acme-dns API on the PowerDNS primary", function () {
       expect(await zoneTxt(uid)).to.deep.equal([`"${txt("a")}"`]);
     });
 
-    it("keeps the two newest values", async () => {
-      for (const c of ["a", "b", "c"]) expect((await update({ subdomain: uid, txt: txt(c) })).status).to.equal(200);
-      expect(await zoneTxt(uid)).to.deep.equal([`"${txt("b")}"`, `"${txt("c")}"`]);
+    it("keeps the four newest values (box and gateway may order at once)", async () => {
+      for (const c of ["a", "b", "c", "d", "e"]) expect((await update({ subdomain: uid, txt: txt(c) })).status).to.equal(200);
+      expect(await zoneTxt(uid)).to.deep.equal(["b", "c", "d", "e"].map((c) => `"${txt(c)}"`));
     });
 
     it("rejects a bad signature, a foreign subdomain or credential, a bad value", async () => {
@@ -140,8 +140,11 @@ describe("acme-dns API on the PowerDNS primary", function () {
     const call = (action: string, body: object, auth = `Bearer ${SERVICE_KEY}`) =>
       request(app).post(`/acme-dns/${action}`).set("Authorization", auth).send(body);
 
-    it("needs the service key", async () => {
+    it("needs the service key, as Bearer or as lego's Basic password", async () => {
       expect((await call("present", { fqdn: fqdn(), value: txt("g") }, "Bearer nope")).status).to.equal(401);
+      const basic = (pw: string) => `Basic ${Buffer.from(`lego:${pw}`).toString("base64")}`;
+      expect((await call("present", { fqdn: fqdn(), value: txt("g") }, basic("nope"))).status).to.equal(401);
+      expect((await call("present", { fqdn: fqdn(), value: txt("g") }, basic(SERVICE_KEY))).status).to.equal(200);
     });
 
     it("presents then cleans up a delegated user's challenge", async () => {
@@ -177,6 +180,38 @@ describe("acme-dns API on the PowerDNS primary", function () {
       expect((await put({ force: "direct" })).status).to.equal(400);
       expect((await put({ force: "gateway" }, other.uid)).status).to.equal(403);
       expect((await put({ force: "gateway", host: "a.b" })).status).to.equal(400);
+    });
+
+    it("accepts the box credential (signature route)", async () => {
+      const bySig = (body: object, key = sig) => request(app).put(`/dns/v1/force/${uid}/${encodeURIComponent(key)}`).send(body);
+      expect((await bySig({ force: "gateway" }, other.sig)).status).to.equal(401);
+      expect((await bySig({ force: "direct" })).status).to.equal(400);
+      expect((await bySig({ force: "gateway" })).body).to.include({ force: "gateway" });
+      expect((await ref(uid).get()).data()?.dns?.force).to.equal("gateway");
+      await bySig({ force: "auto" });
+      expect((await ref(uid).get()).data()?.dns?.force).to.equal(undefined);
+    });
+  });
+
+  describe("GET /gateway/cert/:label and the dns block", () => {
+    it("serves the stored certificate to the service key only", async () => {
+      const get = (auth: string) => request(app).get(`/gateway/cert/${uid}`).set("Authorization", auth);
+      expect((await get("Bearer nope")).status).to.equal(401);
+      expect((await get(`Bearer ${SERVICE_KEY}`)).status).to.equal(404);
+      const stored = { cert: "C", key: "K", notAfter: "2030-01-01T00:00:00.000Z" };
+      await getRedisClient().set(`gwcert:${uid}`, JSON.stringify(stored));
+      try {
+        expect((await get(`Bearer ${SERVICE_KEY}`)).body).to.deep.equal(stored);
+      } finally {
+        await getRedisClient().del(`gwcert:${uid}`);
+      }
+    });
+
+    it("reports delegation, live and force in /resolve/v2", async () => {
+      await ref(uid).update({ "dns.hostForce": { immich: "gateway" } });
+      const res = await request(app).get(`/resolve/v2/${uid}`);
+      expect(res.body.dns).to.include({ delegated: true, live: false, force: "auto", answer: "gateway" });
+      expect(res.body.dns.hostForce).to.deep.equal({ immich: "gateway" });
     });
   });
 });

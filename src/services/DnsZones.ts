@@ -1,4 +1,5 @@
 import { isIPv4, isIPv6 } from "net";
+import { promises as dnsp } from "dns";
 import { getRedisClient } from "../redis/redisClient.js";
 import { FieldValue, getFirestore } from "firebase-admin/firestore";
 import {
@@ -521,6 +522,46 @@ export async function onRegistration(uid: string, data: NSLRouterData | null): P
   await syncUser(user);
 }
 
+// --- live = the parent zone really delegates the user's zone to us ---------
+
+/** Public resolvers asked whether the delegation is in place. */
+const LIVE_RESOLVERS = ["1.1.1.1", "8.8.8.8"];
+const LIVE_TTL_SECONDS = 10 * 60;
+
+function liveKey(label: string): string {
+  return `dns:live:${label.toLowerCase()}`;
+}
+
+/**
+ * True when a public resolver returns exactly our DNS_NS_HOSTS as the NS set of
+ * <label>.<zone>: the delegation is in the parent zone, so a CA validating DNS-01 (and
+ * every browser) reaches our nameservers. Until then nothing orders a certificate.
+ */
+export async function checkLive(label: string): Promise<boolean> {
+  const want = getDnsNsHosts().map((h) => h.toLowerCase().replace(/\.$/, "")).sort().join(",");
+  let live = false;
+  try {
+    const resolver = new dnsp.Resolver({ timeout: 3000, tries: 2 });
+    resolver.setServers(LIVE_RESOLVERS);
+    const got = (await resolver.resolveNs(userZoneName(label))).map((h) => h.toLowerCase().replace(/\.$/, "")).sort().join(",");
+    live = got === want;
+  } catch {
+    live = false; // ENODATA/ENOTFOUND: no NS at that name in the parent zone
+  }
+  await getRedisClient().setex(liveKey(label), LIVE_TTL_SECONDS, live ? "1" : "0");
+  return live;
+}
+
+/** Last live check (refreshed by the full pass); false when unknown. */
+export async function isLive(label: string): Promise<boolean> {
+  return (await getRedisClient().get(liveKey(label))) === "1";
+}
+
+/** Delegated users in the current scope (the gateway certificate issuer's list). */
+export async function delegatedUsers(): Promise<ScopeUser[]> {
+  return [...(await getScope()).values()].filter((u) => u.dns?.delegated);
+}
+
 /** Run `fn` over `items`, at most `limit` at a time. */
 async function pool<T>(items: T[], limit: number, fn: (item: T) => Promise<void>): Promise<void> {
   const queue = [...items];
@@ -546,6 +587,7 @@ export async function syncAllUsers(options: { refreshScope?: boolean } = {}): Pr
 
   await pool(users, PROBE_CONCURRENCY, async (user) => {
     try {
+      if (user.dns?.delegated && !(await getRedisClient().exists(liveKey(user.label)))) await checkLive(user.label);
       if (await probeIfDue(user, PROBE_INTERVAL_MS)) result.probed++;
     } catch (e) {
       console.error(`[dns] ${user.label}: probe failed: ${(e as Error).message ?? e}`);

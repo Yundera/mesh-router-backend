@@ -4,15 +4,15 @@ import { getServerDomain } from "../configuration/config.js";
 /**
  * DNS-01 challenge store behind the acme-dns API (mesh-router-nameserver architecture
  * §7.2). A box sets `_acme-challenge.<label>.<zone>` TXT through POST /acme-dns/update
- * (acme-dns protocol, credential = its Ed25519 signature); the gateway through lego
- * httpreq (/acme-dns/present, /cleanup). DnsZones writes the live values into the
- * user's zone on the hidden primary.
+ * (acme-dns protocol, credential = its Ed25519 signature); a lego-based client through
+ * httpreq (/acme-dns/present, /cleanup); the gateway certificates (GatewayCerts) write
+ * here directly. DnsZones writes the live values into the user's zone on the hidden primary.
  */
 
 /** A value lives this long, then the full pass removes it from the zone. */
 export const ACME_TXT_LIFETIME_MS = 10 * 60 * 1000;
-/** acme-dns semantics: the wildcard and the apex validate in the same order. */
-const MAX_VALUES = 2;
+/** Two per order (the wildcard and the apex validate together), box and gateway may order at once. */
+const MAX_VALUES = 4;
 const RATE_LIMIT = 10;
 const RATE_WINDOW_SECONDS = 60 * 60;
 

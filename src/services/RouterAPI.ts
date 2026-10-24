@@ -10,7 +10,9 @@ import {logDomainAssigned} from "./DomainLogger.js";
 import {runCleanup} from "./DomainCleanup.js";
 import {probeCandidates, checkRateLimit, PROBE_LIMITS} from "./Probe.js";
 import {recordUsage, UsageEvent, MAX_USAGE_EVENTS_PER_REQUEST} from "./Usage.js";
-import {noteRoutes, onRegistration, isUserZonesEnabled, viewUser, isInScope, resyncUser, setForce} from "./DnsZones.js";
+import {noteRoutes, onRegistration, isUserZonesEnabled, viewUser, isInScope, isLive, resyncUser, setForce} from "./DnsZones.js";
+import {getGatewayCert} from "./GatewayCerts.js";
+import {NSLRouterData} from "../DataBaseDTO/DataBaseNSLRouter.js";
 import {acmeLabelFromFqdn, addAcmeTxt, isAcmeTxtValue, removeAcmeTxt, takeAcmeUpdate} from "./AcmeDns.js";
 import {verifyEmailCredential, sendUserEmail, EmailError, EmailSendRequest} from "./Email.js";
 import { getAuth } from "firebase-admin/auth";
@@ -30,6 +32,38 @@ function logAuthFailure(req: Request, reason: string, context: Record<string, un
     path: req.path,
     ...context,
   });
+}
+
+/**
+ * What our nameservers do for a user (the `dns` block of /resolve/v2 and /domains/active),
+ * or undefined when user zones are off. `live` = the parent zone delegates to us.
+ */
+async function dnsSummary(uid: string, data: NSLRouterData, routes: Route[] | null) {
+  if (!isUserZonesEnabled()) return undefined;
+  const view = await viewUser({ uid, label: data.domainName, dns: data.dns }, routes);
+  return {
+    delegated: !!data.dns?.delegated,
+    live: !!data.dns?.delegated && await isLive(data.domainName),
+    force: data.dns?.force ?? "auto",
+    hostForce: data.dns?.hostForce ?? {},
+    answer: view.answer.kind,
+    reason: view.answer.reason,
+    certNotAfter: view.probe?.cert === "trusted" ? view.probe.notAfter ?? null : null,
+  };
+}
+
+/**
+ * lego's httpreq client only sends Basic auth: accept the service key as its password,
+ * beside the usual `Bearer <SERVICE_API_KEY>`.
+ */
+function authenticateServiceOrBasic(req: Request, res: express.Response, next: express.NextFunction) {
+  const header = req.get('Authorization') || '';
+  const key = process.env.SERVICE_API_KEY;
+  if (key && header.startsWith('Basic ')) {
+    const decoded = Buffer.from(header.slice(6), 'base64').toString();
+    if (decoded.slice(decoded.indexOf(':') + 1) === key) return next();
+  }
+  return authenticateService(req, res, next);
 }
 
 /*
@@ -503,16 +537,7 @@ export function routerAPI(expressApp: express.Application) {
       const routesTtl = await getRoutesTTL(domainData.uid);
 
       // What our nameservers answer for the user's names (only when user zones are on)
-      let dns: { delegated: boolean; answer: string; reason: string; certNotAfter: string | null } | undefined;
-      if (isUserZonesEnabled()) {
-        const view = await viewUser({ uid: domainData.uid, label: domainData.domain.domainName, dns: domainData.domain.dns }, routes);
-        dns = {
-          delegated: !!domainData.domain.dns?.delegated,
-          answer: view.answer.kind,
-          reason: view.answer.reason,
-          certNotAfter: view.probe?.cert === "trusted" ? view.probe.notAfter ?? null : null,
-        };
-      }
+      const dns = await dnsSummary(domainData.uid, domainData.domain, routes);
 
       return res.status(200).json({
         userId: domainData.uid,
@@ -588,6 +613,7 @@ export function routerAPI(expressApp: express.Application) {
               ? `${remainingDays}d ${remainingHours}h`
               : `${remainingHours}h`,
             releaseInMs: remainingMs,
+            ...(isUserZonesEnabled() ? { dns: await dnsSummary(userId, userData, routes) } : {}),
           };
 
           if (isOnline) {
@@ -1027,8 +1053,24 @@ export function routerAPI(expressApp: express.Application) {
       return res.status(500).json({ error: error.toString() });
     }
   };
-  router.post('/acme-dns/present', authenticateService, httpreq('present'));
-  router.post('/acme-dns/cleanup', authenticateService, httpreq('cleanup'));
+  router.post('/acme-dns/present', authenticateServiceOrBasic, httpreq('present'));
+  router.post('/acme-dns/cleanup', authenticateServiceOrBasic, httpreq('cleanup'));
+
+  /**
+   * GET /gateway/cert/:label
+   * The certificate a gateway serves for <label>.<zone> and *.<label>.<zone> (issued by
+   * GatewayCerts for live delegated users): {cert, key, notAfter}, 404 when there is none.
+   */
+  router.get('/gateway/cert/:label', authenticateService, async (req, res) => {
+    try {
+      const found = await getGatewayCert(String(req.params.label).toLowerCase());
+      if (!found) return res.status(404).json({ error: "No certificate for this user." });
+      return res.status(200).json(found);
+    } catch (error) {
+      console.error("Error in GET /gateway/cert/:label", error);
+      return res.status(500).json({ error: error.toString() });
+    }
+  });
 
   /**
    * PUT /dns/v1/force/:userid
@@ -1036,14 +1078,10 @@ export function routerAPI(expressApp: express.Application) {
    * gateway, or back to auto. Body {force: "gateway"|"auto", host?}. "direct" and
    * delegation are admin actions (mesh-cli dns).
    */
-  router.put('/dns/v1/force/:userid', authenticate, async (req: AuthUserRequest, res) => {
-    const { userid } = req.params;
+  const setOwnerForce = async (req: Request, res: express.Response) => {
+    const { userid } = req.params as { userid: string };
     const { force, host } = req.body ?? {};
     try {
-      if (req.user?.uid !== userid) {
-        logAuthFailure(req, 'uid_mismatch', { userid, endpoint: 'dns_force' });
-        return res.status(403).json({ error: "You can only change your own DNS settings." });
-      }
       if (force !== 'gateway' && force !== 'auto') {
         return res.status(400).json({ error: 'force must be "gateway" or "auto".' });
       }
@@ -1060,9 +1098,42 @@ export function routerAPI(expressApp: express.Application) {
         answer: result ? { kind: result.answer.kind, reason: result.answer.reason } : null,
       });
     } catch (error) {
-      console.error("Error in PUT /dns/v1/force/:userid", error);
+      console.error("Error in PUT /dns/v1/force", error);
       return res.status(500).json({ error: error.toString() });
     }
+  };
+  router.put('/dns/v1/force/:userid', authenticate, (req: AuthUserRequest, res) => {
+    if (req.user?.uid !== req.params.userid) {
+      logAuthFailure(req, 'uid_mismatch', { userid: req.params.userid, endpoint: 'dns_force' });
+      return res.status(403).json({ error: "You can only change your own DNS settings." });
+    }
+    return setOwnerForce(req, res);
+  });
+
+  /**
+   * PUT /dns/v1/force/:userid/:sig
+   * The same toggle with the box's credential (signature over the user id), for the
+   * box's own console, which holds no Firebase token.
+   */
+  router.put('/dns/v1/force/:userid/:sig', async (req, res) => {
+    const { userid, sig } = req.params;
+    try {
+      const userData = await getUserDomain(userid);
+      let isValid = false;
+      try {
+        isValid = !!userData && await verifySignature(userData.publicKey, sig, userid);
+      } catch {
+        isValid = false;
+      }
+      if (!isValid) {
+        logAuthFailure(req, 'invalid_signature', { userid, endpoint: 'dns_force' });
+        return res.status(401).json({ error: "Invalid signature." });
+      }
+    } catch (error) {
+      console.error("Error in PUT /dns/v1/force/:userid/:sig", error);
+      return res.status(500).json({ error: error.toString() });
+    }
+    return setOwnerForce(req, res);
   });
 
   expressApp.use('/', router);

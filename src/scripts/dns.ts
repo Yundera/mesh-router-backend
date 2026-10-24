@@ -110,7 +110,7 @@ async function status(label: string | undefined, argv: string[]): Promise<void> 
   const a = view.answer;
   console.log(`${view.zone}   (uid ${uid})\n`);
   console.log(`served by us   ${isInScope(data) ? (data.dns?.delegated ? "yes (delegated)" : "yes (shadow zone, not delegated)") : "no"}`);
-  console.log(`force          ${data.dns?.force ?? "auto"}${data.dns?.hostForce ? `   hosts: ${Object.entries(data.dns.hostForce).map(([h, f]) => `${h}=${f}`).join(" ")}` : ""}`);
+  console.log(`force          ${data.dns?.force ?? "auto"}${Object.keys(data.dns?.hostForce ?? {}).length ? `   hosts: ${Object.entries(data.dns?.hostForce ?? {}).map(([h, f]) => `${h}=${f}`).join(" ")}` : ""}`);
   console.log(`public IP      ${view.publicIp ?? MISSING}`);
   const p = view.probe;
   console.log(`probe          ${p ? `${p.at}  cert ${p.cert}${p.notAfter ? `  notAfter ${p.notAfter}` : ""}${p.issuer ? `  issuer ${p.issuer}` : ""}` : `${MISSING} (none within the last hour)`}`);
