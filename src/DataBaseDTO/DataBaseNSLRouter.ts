@@ -1,4 +1,21 @@
 export const NSL_ROUTER_COLLECTION = "nsl-router";
+
+/** What the nameserver answers for a user's names (mesh-router-nameserver architecture §4.3). */
+export type DnsForce = "auto" | "gateway" | "direct";
+
+/**
+ * Nameserver settings for a user, written only by `mesh-cli dns` (DnsZones.ts reads them).
+ * Absent = not delegated, auto.
+ */
+export interface NSLRouterDns {
+    // <user>.<zone> is delegated to our nameservers (the NS record itself is added by hand)
+    delegated?: boolean;
+    // whole user: auto = answer rule, gateway = always the gateway, direct = box IP (admin)
+    force?: DnsForce;
+    // per host label ("immich" for immich.<user>.<zone>), overrides `force`
+    hostForce?: Record<string, "gateway" | "direct">;
+}
+
 export interface NSLRouterData {
     serverDomain: string;
     domainName: string;
@@ -10,6 +27,9 @@ export interface NSLRouterData {
     // Last route registration timestamp (ISO format) - updated on POST /routes
     // Also used as online status indicator (replaces deprecated lastSeenOnline)
     lastRouteRegistration?: string;
+
+    // Nameserver settings (mesh-router-nameserver); absent on most users
+    dns?: NSLRouterDns;
 
     //meta
     id?: string;

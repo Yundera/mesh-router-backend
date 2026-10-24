@@ -10,7 +10,7 @@ import {logDomainAssigned} from "./DomainLogger.js";
 import {runCleanup} from "./DomainCleanup.js";
 import {probeCandidates, checkRateLimit, PROBE_LIMITS} from "./Probe.js";
 import {recordUsage, UsageEvent, MAX_USAGE_EVENTS_PER_REQUEST} from "./Usage.js";
-import {noteRoutes} from "./DnsZones.js";
+import {noteRoutes, onRegistration, isUserZonesEnabled, viewUser} from "./DnsZones.js";
 import {verifyEmailCredential, sendUserEmail, EmailError, EmailSendRequest} from "./Email.js";
 import { getAuth } from "firebase-admin/auth";
 
@@ -387,6 +387,8 @@ export function routerAPI(expressApp: express.Application) {
 
       // ip.<zone> allowlist: a failing nameserver primary must not fail the registration
       noteRoutes(routesToStore).catch((e) => console.error(`[dns] [${userid}] allowlist update failed: ${e.message ?? e}`));
+      // the user's own zone, when our nameservers serve it (delegated, or shadow mode)
+      onRegistration(userid, userData).catch((e) => console.error(`[dns] [${userid}] zone update failed: ${e.message ?? e}`));
 
       return res.status(200).json({
         message: "Routes registered successfully.",
@@ -499,6 +501,18 @@ export function routerAPI(expressApp: express.Application) {
       // Get routes TTL from Redis
       const routesTtl = await getRoutesTTL(domainData.uid);
 
+      // What our nameservers answer for the user's names (only when user zones are on)
+      let dns: { delegated: boolean; answer: string; reason: string; certNotAfter: string | null } | undefined;
+      if (isUserZonesEnabled()) {
+        const view = await viewUser({ uid: domainData.uid, label: domainData.domain.domainName, dns: domainData.domain.dns }, routes);
+        dns = {
+          delegated: !!domainData.domain.dns?.delegated,
+          answer: view.answer.kind,
+          reason: view.answer.reason,
+          certNotAfter: view.probe?.cert === "trusted" ? view.probe.notAfter ?? null : null,
+        };
+      }
+
       return res.status(200).json({
         userId: domainData.uid,
         domainName: domainData.domain.domainName,
@@ -506,6 +520,7 @@ export function routerAPI(expressApp: express.Application) {
         routes: routes || [],  // Empty array if no routes registered
         routesTtl,  // Seconds until routes expire (-2 if no routes)
         lastSeenOnline: domainData.domain.lastRouteRegistration || null,  // Updated on route registration
+        ...(dns ? { dns } : {}),
       });
     } catch (error) {
       console.error("Error in GET /resolve/v2/:domain", error);

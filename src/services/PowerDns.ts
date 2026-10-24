@@ -65,6 +65,11 @@ async function call(method: string, path: string, body?: unknown): Promise<any> 
   return text ? JSON.parse(text) : undefined;
 }
 
+/** Every zone on the primary, without RRsets. */
+export async function listZones(): Promise<Omit<PdnsZone, "rrsets">[]> {
+  return call("GET", "/zones");
+}
+
 /** The zone with its RRsets, or null if the primary does not have it. */
 export async function getZone(zone: string): Promise<PdnsZone | null> {
   try {

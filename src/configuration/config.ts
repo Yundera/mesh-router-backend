@@ -175,3 +175,35 @@ export function getDnsAllowGraceSeconds(): number {
   }
   return DEFAULT_DNS_ALLOW_GRACE_SECONDS;
 }
+
+function commaList(value: string | undefined): string[] {
+  return (value || "")
+    .split(",")
+    .map((item) => item.trim().replace(/\.+$/, "").toLowerCase())
+    .filter((item) => item !== "");
+}
+
+/**
+ * Returns the gateway's public IPv4s, from DNS_GATEWAY_IPS (comma-separated): what a
+ * user's names answer when the box can't serve them itself. Empty when unset.
+ */
+export function getDnsGatewayIps(): string[] {
+  return commaList(process.env.DNS_GATEWAY_IPS);
+}
+
+/**
+ * Returns the public nameserver names (NS records of every user zone), from
+ * DNS_NS_HOSTS (comma-separated, no trailing dots). Empty when unset.
+ */
+export function getDnsNsHosts(): string[] {
+  return commaList(process.env.DNS_NS_HOSTS);
+}
+
+/**
+ * True when DNS_SHADOW_ZONES=1: every active user gets a zone on the nameservers, not
+ * only delegated ones. Without a delegation no resolver asks for those zones, so they
+ * only serve `dig @<ns>` checks of the answer rule.
+ */
+export function isDnsShadowZones(): boolean {
+  return process.env.DNS_SHADOW_ZONES === "1";
+}

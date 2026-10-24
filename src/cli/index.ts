@@ -45,7 +45,7 @@ const COMMANDS: Command[] = [
   },
   {
     name: "dns",
-    description: "Nameserver: `dns allow [--json]` lists the ip.<zone> allowlist; `dns sync [--dry-run]` reconciles it now.",
+    description: "Nameserver: status|delegate|force|probe|sync <user>, allow (ip.<zone> allowlist). `mesh-cli dns` for usage.",
     run: dns,
   },
 ];
