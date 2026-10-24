@@ -5,6 +5,7 @@
  *   dns delegate <user> on|off                 mark <user>.<zone> delegated to our nameservers
  *   dns force <user> [--host <h>] auto|gateway|direct [--yes]
  *   dns probe <user>                           probe the box now
+ *   dns acme <user>                            live DNS-01 challenge values and the update counter
  *   dns sync [<user>] [--dry-run]              reconcile now: one user's zone, or allowlist + every zone
  *   dns allow [--json]                         ip.<zone> allowlist: IPs, last registration, expiry
  *
@@ -14,6 +15,7 @@
  */
 import { promises as dnsp } from "dns";
 import { FieldValue, getFirestore } from "firebase-admin/firestore";
+import { ACME_TXT_LIFETIME_MS, acmeRateState, listAcmeTxt } from "../services/AcmeDns.js";
 import { initializeFb } from "../firebase/firebaseIntegration.js";
 import { NSL_ROUTER_COLLECTION, NSLRouterData } from "../DataBaseDTO/DataBaseNSLRouter.js";
 import { getDomain } from "../services/Domain.js";
@@ -26,6 +28,7 @@ import {
   probeUser,
   resyncUser,
   ScopeUser,
+  setForce,
   syncAllow,
   syncAllUsers,
   syncUser,
@@ -42,6 +45,7 @@ const USAGE = [
   "  delegate <user> on|off",
   "  force <user> [--host <name>] auto|gateway|direct [--yes]",
   "  probe <user>",
+  "  acme <user>",
   "  sync [<user>] [--dry-run]",
   "  allow [--json]",
 ].join("\n");
@@ -111,6 +115,7 @@ async function status(label: string | undefined, argv: string[]): Promise<void> 
   const p = view.probe;
   console.log(`probe          ${p ? `${p.at}  cert ${p.cert}${p.notAfter ? `  notAfter ${p.notAfter}` : ""}${p.issuer ? `  issuer ${p.issuer}` : ""}` : `${MISSING} (none within the last hour)`}`);
   if (p) console.log(`               ${p.reason}`);
+  if (view.acmeTxt.length) console.log(`acme TXT       ${view.acmeTxt.join(" ")}`);
   console.log(`answer         ${a.kind} ${a.ips.join(",")}   (${a.reason})`);
   for (const [host, h] of Object.entries(a.hosts)) {
     console.log(`               ${host}.${view.zone}: ${h.kind} ${h.ips.join(",")}   (${h.reason})`);
@@ -154,12 +159,7 @@ async function force(label: string | undefined, value: string | undefined, argv:
       "the site breaks for that user. Add --yes to confirm.");
   }
   const { uid } = await findUser(label);
-  const field = host ? `dns.hostForce.${host}` : "dns.force";
-  await getFirestore().collection(NSL_ROUTER_COLLECTION).doc(uid).update({
-    [field]: value === "auto" ? FieldValue.delete() : value,
-  });
-  const data = await reload(uid);
-  const result = await resyncUser(uid, data);
+  const { data, result } = await setForce(uid, value, host);
   console.log(`${userZoneName(data.domainName)}${host ? ` host ${host}` : ""}: force ${value}`);
   if (result) {
     console.log(`answer ${result.answer.kind} ${result.answer.ips.join(",")} (${result.answer.reason})`);
@@ -174,6 +174,18 @@ async function probe(label: string | undefined): Promise<void> {
   const { uid, data } = await findUser(label);
   const state = await probeUser({ uid, label: data.domainName, dns: data.dns });
   console.log(JSON.stringify(state, null, 2));
+}
+
+async function acme(label: string | undefined): Promise<void> {
+  const { uid, data } = await findUser(label);
+  const values = await listAcmeTxt(data.domainName);
+  const rate = await acmeRateState(uid);
+  console.log(`_acme-challenge.${userZoneName(data.domainName)}   (updates ${rate.used}/${rate.limit} this hour` +
+    `${rate.used ? `, window resets in ${Math.ceil(rate.resetsIn / 60)} min` : ""})\n`);
+  renderTable(
+    ["value", "set", "expires"],
+    values.map((v) => [v.value, new Date(v.at).toISOString(), new Date(v.at + ACME_TXT_LIFETIME_MS).toISOString()])
+  );
 }
 
 async function sync(target: string | undefined, argv: string[]): Promise<void> {
@@ -233,6 +245,7 @@ export async function main(argv: string[]): Promise<void> {
     case "delegate": return delegate(arg1, arg2);
     case "force": return force(arg1, arg2, argv);
     case "probe": return probe(arg1);
+    case "acme": return acme(arg1);
     case "sync": return sync(arg1, argv);
     case "allow": return allow(argv);
     default:

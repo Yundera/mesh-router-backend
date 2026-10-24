@@ -1,6 +1,6 @@
 import { isIPv4, isIPv6 } from "net";
 import { getRedisClient } from "../redis/redisClient.js";
-import { getFirestore } from "firebase-admin/firestore";
+import { FieldValue, getFirestore } from "firebase-admin/firestore";
 import {
   getDnsAllowGraceSeconds,
   getDnsCatalogZone,
@@ -16,6 +16,7 @@ import { isLanOrReserved } from "./Probe.js";
 import { Route, getRoutes, getActiveUserIds } from "./Routes.js";
 import { getAllUserDomains } from "./Domain.js";
 import { DnsProbeState, getProbeState, probeBox, probeDue, saveProbeState } from "./DnsProbe.js";
+import { getAcmeTxt } from "./AcmeDns.js";
 import * as pdns from "./PowerDns.js";
 
 /**
@@ -227,6 +228,8 @@ export function syncAllow(dryRun = false): Promise<AllowSyncResult> {
 /** TTL of the answer records: short, so a flip direct ↔ gateway lands fast. */
 const ANSWER_TTL = 30;
 const NS_TTL = 3600;
+/** acme-dns serves challenge TXT with TTL 60 (architecture §7.2). */
+const ACME_TXT_TTL = 60;
 /** Probe each user in scope at most this often from the full pass. */
 const PROBE_INTERVAL_MS = 10 * 60 * 1000;
 /** A registration triggers a probe when the last one is older than this. */
@@ -298,8 +301,15 @@ export function answer(input: AnswerInput): DnsAnswer {
   return { ...user, hosts };
 }
 
-/** The A and NS RRsets a user zone should hold (SOA is PowerDNS's). */
-export function desiredUserRRsets(zone: string, ans: DnsAnswer, nsHosts: string[]): pdns.PdnsRRset[] {
+export function acmeChallengeName(zone: string): string {
+  return pdns.fqdn(`_acme-challenge.${zone}`);
+}
+
+/**
+ * The A, NS and DNS-01 TXT RRsets a user zone should hold (SOA is PowerDNS's).
+ * `acmeTxt` = the live challenge values; none = no TXT RRset.
+ */
+export function desiredUserRRsets(zone: string, ans: DnsAnswer, nsHosts: string[], acmeTxt: string[] = []): pdns.PdnsRRset[] {
   const a = (name: string, ips: string[]): pdns.PdnsRRset => ({
     name: pdns.fqdn(name), type: "A", ttl: ANSWER_TTL,
     records: [...ips].sort().map((content) => ({ content, disabled: false })),
@@ -309,12 +319,17 @@ export function desiredUserRRsets(zone: string, ans: DnsAnswer, nsHosts: string[
     a(zone, ans.ips),
     a(`*.${zone}`, ans.ips),
     ...Object.entries(ans.hosts).map(([host, h]) => a(`${host}.${zone}`, h.ips)),
+    ...(acmeTxt.length ? [{
+      name: acmeChallengeName(zone), type: "TXT", ttl: ACME_TXT_TTL,
+      records: [...acmeTxt].sort().map((v) => ({ content: `"${v}"`, disabled: false })),
+    }] : []),
   ];
 }
 
 function sameRecords(x: pdns.PdnsRRset | undefined, y: pdns.PdnsRRset): boolean {
   if (!x) return false;
-  const norm = (r: pdns.PdnsRRset) => r.records.map((rec) => rec.content.toLowerCase()).sort().join(",");
+  // TXT content is case-sensitive; names in A/NS content are not
+  const norm = (r: pdns.PdnsRRset) => r.records.map((rec) => (r.type === "TXT" ? rec.content : rec.content.toLowerCase())).sort().join(",");
   return x.ttl === y.ttl && norm(x) === norm(y);
 }
 
@@ -329,6 +344,8 @@ export interface UserView {
   publicIp: string | null;
   probe: DnsProbeState | null;
   answer: DnsAnswer;
+  // live DNS-01 challenge values
+  acmeTxt: string[];
 }
 
 /**
@@ -342,11 +359,13 @@ async function currentPublicIp(uid: string, routes?: Route[] | null): Promise<st
 
 /** What the user's names answer right now, from stored state (no probe, no write). */
 export async function viewUser(user: ScopeUser, routes?: Route[] | null): Promise<UserView> {
-  const [publicIp, probe] = await Promise.all([currentPublicIp(user.uid, routes), getProbeState(user.uid)]);
+  const [publicIp, probe, acmeTxt] = await Promise.all([
+    currentPublicIp(user.uid, routes), getProbeState(user.uid), getAcmeTxt(user.label),
+  ]);
   const ans = answer({
     force: user.dns?.force, hostForce: user.dns?.hostForce, publicIp, probe, gatewayIps: getDnsGatewayIps(),
   });
-  return { zone: userZoneName(user.label), publicIp, probe, answer: ans };
+  return { zone: userZoneName(user.label), publicIp, probe, answer: ans, acmeTxt };
 }
 
 /** Probe the user's box now and store the result. */
@@ -377,7 +396,7 @@ export interface UserSyncResult {
 async function runSyncUser(user: ScopeUser, dryRun: boolean): Promise<UserSyncResult> {
   const view = await viewUser(user);
   const zone = view.zone;
-  const desired = desiredUserRRsets(zone, view.answer, getDnsNsHosts());
+  const desired = desiredUserRRsets(zone, view.answer, getDnsNsHosts(), view.acmeTxt);
 
   let current = await pdns.getZone(zone);
   let created = false;
@@ -387,9 +406,13 @@ async function runSyncUser(user: ScopeUser, dryRun: boolean): Promise<UserSyncRe
     created = true;
     current = await pdns.getZone(zone);
   }
+  // what we manage: A and NS, and the challenge TXT; anything else is left alone
   const present = new Map<string, pdns.PdnsRRset>();
+  const challenge = acmeChallengeName(zone);
   for (const rrset of current?.rrsets || []) {
-    if (rrset.type === "A" || rrset.type === "NS") present.set(`${rrset.name} ${rrset.type}`, rrset);
+    if (rrset.type === "A" || rrset.type === "NS" || (rrset.type === "TXT" && rrset.name === challenge)) {
+      present.set(`${rrset.name} ${rrset.type}`, rrset);
+    }
   }
 
   const changes: pdns.PdnsRRset[] = [];
@@ -561,6 +584,23 @@ export async function resyncUser(uid: string, data: NSLRouterData | null): Promi
   rememberUser(null, uid);
   if (data?.domainName) await dropUserZone(data.domainName);
   return null;
+}
+
+/**
+ * Set a user's force (or one host's with `host`), then re-sync. "auto" removes the
+ * override. Shared by `mesh-cli dns force` (any value) and the owner API (B7:
+ * gateway|auto only, checked by the caller).
+ */
+export async function setForce(
+  uid: string, value: DnsForce, host?: string
+): Promise<{ data: NSLRouterData; result: UserSyncResult | null }> {
+  if (host !== undefined && !/^[a-z0-9-]+$/.test(host)) throw new Error(`host must be one label (got '${host}')`);
+  const ref = getFirestore().collection(NSL_ROUTER_COLLECTION).doc(uid);
+  const field = host ? `dns.hostForce.${host}` : "dns.force";
+  await ref.update({ [field]: value === "auto" ? FieldValue.delete() : value });
+  const data = (await ref.get()).data() as NSLRouterData;
+  // stored either way; written to a zone only where user zones run
+  return { data, result: isUserZonesEnabled() ? await resyncUser(uid, data) : null };
 }
 
 // ============================================================================

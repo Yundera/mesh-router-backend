@@ -10,7 +10,8 @@ import {logDomainAssigned} from "./DomainLogger.js";
 import {runCleanup} from "./DomainCleanup.js";
 import {probeCandidates, checkRateLimit, PROBE_LIMITS} from "./Probe.js";
 import {recordUsage, UsageEvent, MAX_USAGE_EVENTS_PER_REQUEST} from "./Usage.js";
-import {noteRoutes, onRegistration, isUserZonesEnabled, viewUser} from "./DnsZones.js";
+import {noteRoutes, onRegistration, isUserZonesEnabled, viewUser, isInScope, resyncUser, setForce} from "./DnsZones.js";
+import {acmeLabelFromFqdn, addAcmeTxt, isAcmeTxtValue, removeAcmeTxt, takeAcmeUpdate} from "./AcmeDns.js";
 import {verifyEmailCredential, sendUserEmail, EmailError, EmailSendRequest} from "./Email.js";
 import { getAuth } from "firebase-admin/auth";
 
@@ -936,6 +937,130 @@ export function routerAPI(expressApp: express.Application) {
       return res.status(200).json({ results });
     } catch (error) {
       console.error("Error in POST /probe", error);
+      return res.status(500).json({ error: error.toString() });
+    }
+  });
+
+  // ============================================================================
+  // DNS-01 challenges and DNS settings (mesh-router-nameserver architecture §7.2)
+  // ============================================================================
+
+  /**
+   * POST /acme-dns/update
+   * The acme-dns API, so Caddy (caddy-dns/acmedns), lego, certbot and acme.sh work as is
+   * with server_url = <backend>/router/api/acme-dns. Credential: X-Api-User = user id,
+   * X-Api-Key = the box's Ed25519 signature over it (same as POST /routes). Body
+   * {subdomain, txt}: subdomain must be the user's own domain label. Sets
+   * _acme-challenge.<label>.<zone> TXT (at most 2 values, 10 min) on the hidden primary
+   * before answering. No /register: every box is registered by its user id.
+   */
+  router.post('/acme-dns/update', async (req, res) => {
+    const userid = req.get('X-Api-User');
+    const sig = req.get('X-Api-Key');
+    const { subdomain, txt } = req.body ?? {};
+    try {
+      if (!userid || !sig) {
+        logAuthFailure(req, 'missing_credentials', { endpoint: 'acme_dns_update' });
+        return res.status(401).json({ error: "X-Api-User and X-Api-Key are required." });
+      }
+      const userData = await getUserDomain(userid);
+      let isValid = false;
+      try {
+        isValid = !!userData && await verifySignature(userData.publicKey, sig, userid);
+      } catch {
+        isValid = false;
+      }
+      if (!isValid) {
+        logAuthFailure(req, 'invalid_signature', { userid, endpoint: 'acme_dns_update' });
+        return res.status(401).json({ error: "Invalid credentials." });
+      }
+      if (typeof subdomain !== 'string' || subdomain.toLowerCase() !== userData.domainName.toLowerCase()) {
+        logAuthFailure(req, 'acme_foreign_subdomain', { userid, subdomain });
+        return res.status(403).json({ error: "subdomain must be your own domain label." });
+      }
+      if (!isAcmeTxtValue(txt)) {
+        return res.status(400).json({ error: "txt must be a 43-character DNS-01 challenge value." });
+      }
+      if (!isUserZonesEnabled() || !isInScope(userData)) {
+        return res.status(409).json({ error: "Your domain is not served by our nameservers." });
+      }
+      if (!(await takeAcmeUpdate(userid))) {
+        return res.status(429).json({ error: "Too many challenge updates, try again within the hour." });
+      }
+      await addAcmeTxt(userData.domainName, txt);
+      await resyncUser(userid, userData);
+      console.log(`[acme-dns] ${userData.domainName}: challenge TXT set`);
+      return res.status(200).json({ txt });
+    } catch (error) {
+      console.error("Error in POST /acme-dns/update", error);
+      return res.status(500).json({ error: error.toString() });
+    }
+  });
+
+  /**
+   * POST /acme-dns/present, /acme-dns/cleanup
+   * lego's httpreq protocol for the gateway (Traefik): {fqdn, value} with
+   * Authorization: Bearer SERVICE_API_KEY. Only _acme-challenge.<label>.<zone>. of a
+   * delegated user: the gateway needs certs only for names our nameservers really serve.
+   */
+  const httpreq = (action: 'present' | 'cleanup') => async (req: Request, res: express.Response) => {
+    const { fqdn, value } = req.body ?? {};
+    try {
+      const label = acmeLabelFromFqdn(fqdn);
+      if (!label) {
+        return res.status(400).json({ error: "fqdn must be _acme-challenge.<user>.<zone>." });
+      }
+      if (!isAcmeTxtValue(value)) {
+        return res.status(400).json({ error: "value must be a 43-character DNS-01 challenge value." });
+      }
+      const found = await getDomain(label);
+      if (!found || !found.domain.dns?.delegated || !isUserZonesEnabled()) {
+        return res.status(403).json({ error: `${label} is not delegated to our nameservers.` });
+      }
+      if (action === 'present') await addAcmeTxt(label, value);
+      else await removeAcmeTxt(label, value);
+      await resyncUser(found.uid, found.domain);
+      console.log(`[acme-dns] ${label}: gateway ${action}`);
+      return res.status(200).json({});
+    } catch (error) {
+      console.error(`Error in POST /acme-dns/${action}`, error);
+      return res.status(500).json({ error: error.toString() });
+    }
+  };
+  router.post('/acme-dns/present', authenticateService, httpreq('present'));
+  router.post('/acme-dns/cleanup', authenticateService, httpreq('cleanup'));
+
+  /**
+   * PUT /dns/v1/force/:userid
+   * The owner's own toggle: route their names (or one host with `host`) through the
+   * gateway, or back to auto. Body {force: "gateway"|"auto", host?}. "direct" and
+   * delegation are admin actions (mesh-cli dns).
+   */
+  router.put('/dns/v1/force/:userid', authenticate, async (req: AuthUserRequest, res) => {
+    const { userid } = req.params;
+    const { force, host } = req.body ?? {};
+    try {
+      if (req.user?.uid !== userid) {
+        logAuthFailure(req, 'uid_mismatch', { userid, endpoint: 'dns_force' });
+        return res.status(403).json({ error: "You can only change your own DNS settings." });
+      }
+      if (force !== 'gateway' && force !== 'auto') {
+        return res.status(400).json({ error: 'force must be "gateway" or "auto".' });
+      }
+      if (host !== undefined && (typeof host !== 'string' || !/^[a-z0-9-]+$/.test(host.toLowerCase()))) {
+        return res.status(400).json({ error: "host must be one DNS label." });
+      }
+      if (!(await getUserDomain(userid))) {
+        return res.status(404).json({ error: "User not found." });
+      }
+      const { result } = await setForce(userid, force, host?.toLowerCase());
+      return res.status(200).json({
+        force,
+        ...(host ? { host: host.toLowerCase() } : {}),
+        answer: result ? { kind: result.answer.kind, reason: result.answer.reason } : null,
+      });
+    } catch (error) {
+      console.error("Error in PUT /dns/v1/force/:userid", error);
       return res.status(500).json({ error: error.toString() });
     }
   });
