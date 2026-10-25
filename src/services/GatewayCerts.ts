@@ -50,6 +50,23 @@ export async function getGatewayCert(label: string): Promise<GatewayCert | null>
   }
 }
 
+/**
+ * The labels a gateway may hold a certificate for, with each certificate's notAfter:
+ * delegated users that have one. Gateways poll it (GET /gateway/certs) and only fetch
+ * a certificate for a label listed here, so a handshake on any other name (every dash
+ * name behind Cloudflare) costs no backend call; a changed notAfter = a renewal to
+ * fetch. Empty when user zones are off.
+ */
+export async function listGatewayCerts(): Promise<Record<string, string>> {
+  const out: Record<string, string> = {};
+  if (!isUserZonesEnabled()) return out;
+  for (const user of await delegatedUsers()) {
+    const cert = await getGatewayCert(user.label);
+    if (cert) out[user.label.toLowerCase()] = cert.notAfter;
+  }
+  return out;
+}
+
 /** The ACME client, with an account key kept in Redis so restarts reuse the account. */
 async function acmeClient(): Promise<acme.Client> {
   const redis = getRedisClient();

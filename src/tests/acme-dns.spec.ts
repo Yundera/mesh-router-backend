@@ -207,6 +207,18 @@ describe("acme-dns API on the PowerDNS primary", function () {
       }
     });
 
+    it("lists the labels holding a certificate, to the service key only", async () => {
+      const list = (auth: string) => request(app).get("/gateway/certs").set("Authorization", auth);
+      expect((await list("Bearer nope")).status).to.equal(401);
+      expect((await list(`Bearer ${SERVICE_KEY}`)).body.labels).not.to.have.property(uid.toLowerCase());
+      await getRedisClient().set(`gwcert:${uid}`, JSON.stringify({ cert: "C", key: "K", notAfter: "2030-01-01T00:00:00.000Z" }));
+      try {
+        expect((await list(`Bearer ${SERVICE_KEY}`)).body.labels).to.include({ [uid.toLowerCase()]: "2030-01-01T00:00:00.000Z" });
+      } finally {
+        await getRedisClient().del(`gwcert:${uid}`);
+      }
+    });
+
     it("reports delegation, live and force in /resolve/v2", async () => {
       await ref(uid).update({ "dns.hostForce": { immich: "gateway" } });
       const res = await request(app).get(`/resolve/v2/${uid}`);

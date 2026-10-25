@@ -11,7 +11,7 @@ import {runCleanup} from "./DomainCleanup.js";
 import {probeCandidates, checkRateLimit, PROBE_LIMITS} from "./Probe.js";
 import {recordUsage, UsageEvent, MAX_USAGE_EVENTS_PER_REQUEST} from "./Usage.js";
 import {noteRoutes, onRegistration, isUserZonesEnabled, viewUser, isInScope, isLive, resyncUser, setForce} from "./DnsZones.js";
-import {getGatewayCert} from "./GatewayCerts.js";
+import {getGatewayCert, listGatewayCerts} from "./GatewayCerts.js";
 import {getDnsHealth, httpStatusFor} from "./DnsHealth.js";
 import {NSLRouterData} from "../DataBaseDTO/DataBaseNSLRouter.js";
 import {acmeLabelFromFqdn, addAcmeTxt, isAcmeTxtValue, removeAcmeTxt, takeAcmeUpdate} from "./AcmeDns.js";
@@ -1070,6 +1070,20 @@ export function routerAPI(expressApp: express.Application) {
     } catch (error) {
       console.error("Error in GET /dns/health", error);
       return res.status(500).json({ status: "degraded", problems: [String(error)] });
+    }
+  });
+
+  /**
+   * GET /gateway/certs
+   * {labels: {<label>: <notAfter>}}: the users a gateway holds a certificate for. The
+   * gateway polls it and asks /gateway/cert/:label only for those (certs.lua).
+   */
+  router.get('/gateway/certs', authenticateService, async (req, res) => {
+    try {
+      return res.status(200).json({ labels: await listGatewayCerts() });
+    } catch (error) {
+      console.error("Error in GET /gateway/certs", error);
+      return res.status(500).json({ error: error.toString() });
     }
   });
 
