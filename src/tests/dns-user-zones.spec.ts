@@ -253,6 +253,15 @@ describe("DNS user zones on the PowerDNS primary", function () {
       expect(await catchUpSerial(zone(), [dnsAddr])).to.equal(true);
       expect((await pdns.getZone(zone()))?.serial).to.be.greaterThan(2099010150);
       expect(await catchUpSerial(zone(), [dnsAddr])).to.equal(false);
+      // in sync (same serial on the nameserver): nothing to lift
+      const ours = (await pdns.getZone(zone()))!.serial;
+      // PowerDNS adds one to a patched serial: ours - 1 lands on ours
+      ahead[2] = String(ours - 1);
+      await fetch(`${base}/${name}`, { method: "PATCH", headers: h, body: JSON.stringify({ rrsets: [{ ...soa, changetype: "REPLACE", records: [{ content: ahead.join(" "), disabled: false }] }] }) });
+      const mirrored = (await (await fetch(`${base}/${name}`, { headers: h })).json()).serial;
+      expect(mirrored).to.be.at.most(ours);
+      expect(await catchUpSerial(zone(), [dnsAddr])).to.equal(false);
+      expect((await pdns.getZone(zone()))?.serial).to.equal(ours);
     } finally {
       await fetch(`${base}/${name}`, { method: "DELETE", headers: h });
     }

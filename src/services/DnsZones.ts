@@ -608,10 +608,16 @@ async function liftNewZone(zone: string): Promise<void> {
   }
 }
 
-/** Lift `zone`'s serial on the primary above every nameserver's, then NOTIFY. */
+/**
+ * Lift `zone`'s serial on the primary above a nameserver that is AHEAD of it, then
+ * NOTIFY. Equal = in sync: nothing to do (lifting then would re-transfer every zone on
+ * every check).
+ */
 export async function catchUpSerial(zone: string, addresses?: string[]): Promise<boolean> {
   const theirs = await nameserverSerial(zone, addresses);
   if (theirs === null) return false;
+  const ours = (await pdns.getZone(zone))?.serial ?? 0;
+  if (theirs <= ours) return false;
   const lifted = await serialized(() => pdns.setSerialAtLeast(zone, theirs + 1));
   if (lifted) {
     await pdns.notifyZone(zone);
