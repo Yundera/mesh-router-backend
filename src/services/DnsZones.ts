@@ -534,7 +534,9 @@ export async function onRegistration(uid: string, data: NSLRouterData | null): P
 
 /** Public resolvers asked whether the delegation is in place. */
 const LIVE_RESOLVERS = ["1.1.1.1", "8.8.8.8"];
-const LIVE_TTL_SECONDS = 10 * 60;
+/** Kept this long, re-checked every LIVE_REFRESH_SECONDS: a reader never meets a gap. */
+const LIVE_TTL_SECONDS = 60 * 60;
+const LIVE_REFRESH_SECONDS = 10 * 60;
 
 function liveKey(label: string): string {
   return `dns:live:${label.toLowerCase()}`;
@@ -547,17 +549,29 @@ function liveKey(label: string): string {
  */
 export async function checkLive(label: string): Promise<boolean> {
   const want = getDnsNsHosts().map((h) => h.toLowerCase().replace(/\.$/, "")).sort().join(",");
-  let live = false;
+  let live: boolean;
   try {
     const resolver = new dnsp.Resolver({ timeout: 3000, tries: 2 });
     resolver.setServers(LIVE_RESOLVERS);
     const got = (await resolver.resolveNs(userZoneName(label))).map((h) => h.toLowerCase().replace(/\.$/, "")).sort().join(",");
     live = got === want;
-  } catch {
-    live = false; // ENODATA/ENOTFOUND: no NS at that name in the parent zone
+  } catch (e) {
+    const code = (e as NodeJS.ErrnoException).code;
+    if (code !== dnsp.NODATA && code !== dnsp.NOTFOUND) {
+      // timeout, SERVFAIL…: no answer is not "not delegated" — keep the last value
+      // (a box flips its certificates on this flag: mesh-router-caddy's zone file)
+      return isLive(label);
+    }
+    live = false; // no NS at that name in the parent zone
   }
   await getRedisClient().setex(liveKey(label), LIVE_TTL_SECONDS, live ? "1" : "0");
   return live;
+}
+
+/** True when the live flag is missing or older than LIVE_REFRESH_SECONDS. */
+async function liveDue(label: string): Promise<boolean> {
+  const ttl = await getRedisClient().ttl(liveKey(label));
+  return ttl < 0 || ttl <= LIVE_TTL_SECONDS - LIVE_REFRESH_SECONDS;
 }
 
 /** Last live check (refreshed by the full pass); false when unknown. */
@@ -667,7 +681,7 @@ export async function syncAllUsers(options: { refreshScope?: boolean } = {}): Pr
 
   await pool(users, PROBE_CONCURRENCY, async (user) => {
     try {
-      if (user.dns?.delegated && !(await getRedisClient().exists(liveKey(user.label)))) await checkLive(user.label);
+      if (user.dns?.delegated && (await liveDue(user.label))) await checkLive(user.label);
       if (await probeIfDue(user, PROBE_INTERVAL_MS)) result.probed++;
     } catch (e) {
       console.error(`[dns] ${user.label}: probe failed: ${(e as Error).message ?? e}`);
