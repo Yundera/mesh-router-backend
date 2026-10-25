@@ -12,6 +12,7 @@ import {probeCandidates, checkRateLimit, PROBE_LIMITS} from "./Probe.js";
 import {recordUsage, UsageEvent, MAX_USAGE_EVENTS_PER_REQUEST} from "./Usage.js";
 import {noteRoutes, onRegistration, isUserZonesEnabled, viewUser, isInScope, isLive, resyncUser, setForce} from "./DnsZones.js";
 import {getGatewayCert} from "./GatewayCerts.js";
+import {getDnsHealth, httpStatusFor} from "./DnsHealth.js";
 import {NSLRouterData} from "../DataBaseDTO/DataBaseNSLRouter.js";
 import {acmeLabelFromFqdn, addAcmeTxt, isAcmeTxtValue, removeAcmeTxt, takeAcmeUpdate} from "./AcmeDns.js";
 import {verifyEmailCredential, sendUserEmail, EmailError, EmailSendRequest} from "./Email.js";
@@ -1055,6 +1056,22 @@ export function routerAPI(expressApp: express.Application) {
   };
   router.post('/acme-dns/present', authenticateServiceOrBasic, httpreq('present'));
   router.post('/acme-dns/cleanup', authenticateServiceOrBasic, httpreq('cleanup'));
+
+  /**
+   * GET /dns/health
+   * Public nameservers' health for an external monitor (UptimeRobot): 200 ok/off,
+   * 500 degraded (a nameserver down or behind the primary), 503 down (none answers).
+   * Recomputed at most once a minute; user zones are counted, never named.
+   */
+  router.get('/dns/health', async (req, res) => {
+    try {
+      const health = await getDnsHealth();
+      return res.status(httpStatusFor(health.status)).json(health);
+    } catch (error) {
+      console.error("Error in GET /dns/health", error);
+      return res.status(500).json({ status: "degraded", problems: [String(error)] });
+    }
+  });
 
   /**
    * GET /gateway/cert/:label
