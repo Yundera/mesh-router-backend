@@ -23,6 +23,7 @@ export interface PdnsZone {
   kind: string;
   serial: number;
   catalog?: string;
+  soa_edit_api?: string;
   rrsets: PdnsRRset[];
 }
 
@@ -83,6 +84,16 @@ export async function getZone(zone: string): Promise<PdnsZone | null> {
 }
 
 /**
+ * SOA-EDIT-API of a producer catalog: none. PowerDNS itself sets the catalog's serial
+ * to the current epoch whenever its member list changes, even when that is lower than
+ * the current serial. Under the default SOA-EDIT-API our own bumps (bumpSerial) became
+ * YYYYMMDDnn, far above the epoch, so after one bump every later member change got a
+ * lower serial and the secondaries stopped taking it. With none, bumpSerial keeps the
+ * serial on the epoch itself.
+ */
+export const CATALOG_SOA_EDIT_API = "";
+
+/**
  * Create a zone. kind "Primary" for a served zone (optionally a member of `catalog`),
  * "Producer" for the catalog itself. The SOA comes from the primary's
  * default-soa-content.
@@ -97,7 +108,13 @@ export async function createZone(
     kind,
     nameservers: (options.nameservers || []).map(fqdn),
     ...(options.catalog ? { catalog: fqdn(options.catalog) } : {}),
+    ...(kind === "Producer" ? { soa_edit_api: CATALOG_SOA_EDIT_API } : {}),
   });
+}
+
+/** Change a zone's SOA-EDIT-API (a catalog created before CATALOG_SOA_EDIT_API). */
+export async function setSoaEditApi(zone: string, value: string): Promise<void> {
+  await call("PUT", `/zones/${fqdn(zone)}`, { soa_edit_api: value });
 }
 
 export async function deleteZone(zone: string): Promise<void> {
@@ -111,13 +128,16 @@ export async function patchRRsets(zone: string, rrsets: PdnsRRset[]): Promise<vo
 }
 
 /**
- * Bump the zone's SOA serial by one (PowerDNS may round it up to its own scheme).
- * Needed for a producer catalog after a member zone is deleted: PowerDNS bumps the
- * catalog's serial when a member is added, not when one is deleted, so without this
- * the secondaries never re-transfer the catalog and keep serving the deleted zone.
+ * Bump the zone's SOA serial to the current epoch, or by one when it is already there.
+ * Used on a producer catalog after a member zone is deleted, so the secondaries
+ * re-transfer it and drop the zone without waiting for PowerDNS's own catalog check.
+ * The epoch, not current + 1: PowerDNS moves the catalog to the epoch on the next
+ * member change, and a serial above it would hide that change from the secondaries.
  */
 export async function bumpSerial(zone: string): Promise<void> {
-  await setSerialAtLeast(zone, null);
+  const z = await getZone(zone);
+  if (!z) throw new Error(`no zone ${fqdn(zone)}`);
+  await setSerialAtLeast(zone, Math.max(z.serial + 1, Math.floor(Date.now() / 1000)));
 }
 
 /**

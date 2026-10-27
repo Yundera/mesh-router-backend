@@ -194,7 +194,23 @@ describe("DNS user zones on the PowerDNS primary", function () {
     ]);
     const z = await pdns.getZone(zone());
     expect(z?.catalog).to.equal(`catalog.${process.env.SERVER_DOMAIN}.invalid.`);
-    expect((await pdns.getZone(`catalog.${process.env.SERVER_DOMAIN}.invalid`))?.kind).to.equal("Producer");
+    const catalog = await pdns.getZone(`catalog.${process.env.SERVER_DOMAIN}.invalid`);
+    expect(catalog?.kind).to.equal("Producer");
+    expect(catalog?.soa_edit_api).to.equal("");
+  });
+
+  it("keeps the catalog serial on the epoch when a member is deleted", async () => {
+    const catalog = `catalog.${process.env.SERVER_DOMAIN}.invalid`;
+    await pdns.setSoaEditApi(catalog, "DEFAULT"); // a catalog created by an older backend
+    await syncUser(user);
+    expect((await pdns.getZone(catalog))?.soa_edit_api).to.equal("");
+
+    const before = Math.floor(Date.now() / 1000);
+    await dropUserZone(user.label);
+    const serial = (await pdns.getZone(catalog))?.serial ?? 0;
+    expect(serial).to.be.within(before, Math.floor(Date.now() / 1000) + 2); // the epoch, not YYYYMMDDnn
+    await syncUser(user);
+    expect((await pdns.getZone(catalog))?.serial).to.be.at.least(serial);
   });
 
   it("is idempotent, flips to the box on a trusted probe, and back", async () => {

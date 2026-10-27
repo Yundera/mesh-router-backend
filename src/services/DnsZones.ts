@@ -126,12 +126,24 @@ function desiredAllowRRsets(ips: string[]): Map<string, pdns.PdnsRRset> {
   return out;
 }
 
-/** Create the catalog (producer) zone if the primary lacks it (disposable primary). */
+/**
+ * Create the catalog (producer) zone if the primary lacks it (disposable primary), and
+ * move an older one to CATALOG_SOA_EDIT_API. A catalog already stuck on a YYYYMMDDnn
+ * serial stays stuck until its serial is brought back to the epoch by hand (two steps,
+ * RFC 1982): logged, not fixed here.
+ */
 async function ensureCatalog(created: string[]): Promise<string> {
   const catalog = getDnsCatalogZone();
-  if (!(await pdns.getZone(catalog))) {
+  const current = await pdns.getZone(catalog);
+  if (!current) {
     await pdns.createZone(catalog, "Producer");
     created.push(catalog);
+  } else if (current.soa_edit_api !== pdns.CATALOG_SOA_EDIT_API) {
+    await pdns.setSoaEditApi(catalog, pdns.CATALOG_SOA_EDIT_API);
+    console.log(`[dns] ${pdns.fqdn(catalog)}: SOA-EDIT-API ${current.soa_edit_api} -> none`);
+    if (current.serial > Math.floor(Date.now() / 1000) + 86400) {
+      console.warn(`[dns] ${pdns.fqdn(catalog)}: serial ${current.serial} is above the epoch, new members will not reach the secondaries until it is brought back`);
+    }
   }
   return catalog;
 }
