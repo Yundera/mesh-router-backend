@@ -23,6 +23,16 @@ export interface ProbeResult {
  * weaponizing the endpoint to scan internal infrastructure of the host
  * running mesh-router-backend.
  */
+/** RFC 1918 or CGNAT IPv4: the address space a WireGuard tunnel subnet can use. */
+export function isPrivateIPv4(ip: unknown): boolean {
+  if (typeof ip !== 'string' || !isIPv4(ip)) return false;
+  const [a, b] = ip.split('.').map(Number);
+  return a === 10
+    || (a === 172 && b >= 16 && b <= 31)
+    || (a === 192 && b === 168)
+    || (a === 100 && b >= 64 && b <= 127);
+}
+
 export function isLanOrReserved(ip: string): boolean {
   if (isIPv4(ip)) {
     const parts = ip.split('.').map(Number);

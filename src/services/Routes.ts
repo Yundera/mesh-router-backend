@@ -19,6 +19,7 @@ export interface Route {
   source: string;                  // Source identifier (e.g., "agent", "tunnel") - routes from same source replace each other
   type?: "ip" | "domain";          // Route type: "ip" for direct IP, "domain" for pre-validated domain routes (default: "ip")
   domain?: string;                 // Domain hostname (required when type="domain", e.g., "88-187-147-189.sslip.io")
+  tunnelIp?: string;               // Tunnel routes: the box's WireGuard address, reached on :443 by gateways that route the tunnel subnet
 }
 
 /**

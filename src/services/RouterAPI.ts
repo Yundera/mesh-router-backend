@@ -8,7 +8,7 @@ import {validateRoutes} from "./RouteValidator.js";
 import {getCACertificate, signCSR, isCAInitialized} from "./CertificateAuthority.js";
 import {logDomainAssigned} from "./DomainLogger.js";
 import {runCleanup} from "./DomainCleanup.js";
-import {probeCandidates, checkRateLimit, PROBE_LIMITS} from "./Probe.js";
+import {probeCandidates, checkRateLimit, PROBE_LIMITS, isPrivateIPv4} from "./Probe.js";
 import {recordUsage, UsageEvent, MAX_USAGE_EVENTS_PER_REQUEST} from "./Usage.js";
 import {noteRoutes, onRegistration, isUserZonesEnabled, viewUser, isInScope, isLive, resyncUser, setForce} from "./DnsZones.js";
 import {getGatewayCert, listGatewayCerts} from "./GatewayCerts.js";
@@ -283,7 +283,7 @@ export function routerAPI(expressApp: express.Application) {
    * Register or update routes for a user.
    * Routes are stored in Redis with a TTL (refreshed on each call).
    *
-   * Body: { routes: [{ ip, port, priority, source, scheme?, type?, domain? }] }
+   * Body: { routes: [{ ip, port, priority, source, scheme?, type?, domain?, tunnelIp? }] }
    *   - ip: string - IP address of the route endpoint
    *   - port: number - Port number (1-65535)
    *   - priority: number - Lower = higher priority (1 = direct, 2 = tunnel)
@@ -353,6 +353,11 @@ export function routerAPI(expressApp: express.Application) {
         if (r.type === 'domain' && !r.domain) {
           throw new Error(`Route ${index}: domain is required when type is "domain".`);
         }
+        // tunnelIp: a private IPv4 on a tunnel route (the gateway also checks it is in
+        // the tunnel subnet it routes)
+        if (r.tunnelIp !== undefined && (r.source !== 'tunnel' || !isPrivateIPv4(r.tunnelIp))) {
+          throw new Error(`Route ${index}: tunnelIp must be a private IPv4 address on a tunnel route.`);
+        }
 
         const route: Route = {
           ip: r.ip,
@@ -379,6 +384,10 @@ export function routerAPI(expressApp: express.Application) {
         // Add domain if provided
         if (r.domain) {
           route.domain = r.domain;
+        }
+
+        if (r.tunnelIp) {
+          route.tunnelIp = r.tunnelIp;
         }
 
         return route;
