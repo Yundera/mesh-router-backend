@@ -14,6 +14,9 @@ export interface NSLRouterDns {
     force?: DnsForce;
     // per host label ("immich" for immich.<user>.<zone>), overrides `force`
     hostForce?: Record<string, "gateway" | "direct">;
+    // the box's Let's Encrypt account URIs, reported by the box (PUT /dns/v1/caa): the zone's
+    // CAA lets only these accounts obtain certificates for the user's names
+    caaAccounts?: string[];
 }
 
 export interface NSLRouterData {

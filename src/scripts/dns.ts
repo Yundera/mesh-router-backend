@@ -116,6 +116,7 @@ async function status(label: string | undefined, argv: string[]): Promise<void> 
   console.log(`probe          ${p ? `${p.at}  cert ${p.cert}${p.notAfter ? `  notAfter ${p.notAfter}` : ""}${p.issuer ? `  issuer ${p.issuer}` : ""}` : `${MISSING} (none within the last hour)`}`);
   if (p) console.log(`               ${p.reason}`);
   if (view.acmeTxt.length) console.log(`acme TXT       ${view.acmeTxt.join(" ")}`);
+  console.log(`CAA accounts   ${view.caaAccounts.length ? view.caaAccounts.join(" ") : `${MISSING} (any CA may issue)`}`);
   console.log(`answer         ${a.kind} ${a.ips.join(",")}   (${a.reason})`);
   for (const [host, h] of Object.entries(a.hosts)) {
     console.log(`               ${host}.${view.zone}: ${h.kind} ${h.ips.join(",")}   (${h.reason})`);

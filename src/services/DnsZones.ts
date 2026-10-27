@@ -244,6 +244,8 @@ const ANSWER_TTL = 30;
 const NS_TTL = 3600;
 /** acme-dns serves challenge TXT with TTL 60 (architecture §7.2). */
 const ACME_TXT_TTL = 60;
+/** A box's accounts change rarely (rebuild, email change). */
+const CAA_TTL = 300;
 /** Probe each user in scope at most this often from the full pass. */
 const PROBE_INTERVAL_MS = 10 * 60 * 1000;
 /** A registration triggers a probe when the last one is older than this. */
@@ -319,11 +321,32 @@ export function acmeChallengeName(zone: string): string {
   return pdns.fqdn(`_acme-challenge.${zone}`);
 }
 
+/** Let's Encrypt account URIs (production and staging): the only issuer of a box's zone certificates. */
+const ACME_ACCOUNT_URI = /^https:\/\/acme(-staging)?-v02\.api\.letsencrypt\.org\/acme\/acct\/\d{1,20}$/;
+/** A box holds one account per email it ever used. */
+export const MAX_CAA_ACCOUNTS = 4;
+
+export function isAcmeAccountUri(uri: unknown): uri is string {
+  return typeof uri === "string" && ACME_ACCOUNT_URI.test(uri);
+}
+
 /**
- * The A, NS and DNS-01 TXT RRsets a user zone should hold (SOA is PowerDNS's).
- * `acmeTxt` = the live challenge values; none = no TXT RRset.
+ * The zone's CAA records (phase-1.1-gateway-tls.md §7): Let's Encrypt only, and only for the
+ * box's own ACME accounts, for names and wildcards alike. No account = none (any CA may issue).
  */
-export function desiredUserRRsets(zone: string, ans: DnsAnswer, nsHosts: string[], acmeTxt: string[] = []): pdns.PdnsRRset[] {
+export function caaRecords(accounts: string[]): string[] {
+  const sorted = [...accounts].sort();
+  return ["issue", "issuewild"].flatMap((tag) => sorted.map((a) => `0 ${tag} "letsencrypt.org; accounturi=${a}"`));
+}
+
+/**
+ * The A, NS, DNS-01 TXT and CAA RRsets a user zone should hold (SOA is PowerDNS's).
+ * `acmeTxt` = the live challenge values; none = no TXT RRset. `caaAccounts` = the box's
+ * ACME accounts; none = no CAA RRset.
+ */
+export function desiredUserRRsets(
+  zone: string, ans: DnsAnswer, nsHosts: string[], acmeTxt: string[] = [], caaAccounts: string[] = []
+): pdns.PdnsRRset[] {
   const a = (name: string, ips: string[]): pdns.PdnsRRset => ({
     name: pdns.fqdn(name), type: "A", ttl: ANSWER_TTL,
     records: [...ips].sort().map((content) => ({ content, disabled: false })),
@@ -337,13 +360,17 @@ export function desiredUserRRsets(zone: string, ans: DnsAnswer, nsHosts: string[
       name: acmeChallengeName(zone), type: "TXT", ttl: ACME_TXT_TTL,
       records: [...acmeTxt].sort().map((v) => ({ content: `"${v}"`, disabled: false })),
     }] : []),
+    ...(caaAccounts.length ? [{
+      name: pdns.fqdn(zone), type: "CAA", ttl: CAA_TTL,
+      records: caaRecords(caaAccounts).map((content) => ({ content, disabled: false })),
+    }] : []),
   ];
 }
 
 function sameRecords(x: pdns.PdnsRRset | undefined, y: pdns.PdnsRRset): boolean {
   if (!x) return false;
-  // TXT content is case-sensitive; names in A/NS content are not
-  const norm = (r: pdns.PdnsRRset) => r.records.map((rec) => (r.type === "TXT" ? rec.content : rec.content.toLowerCase())).sort().join(",");
+  // TXT and CAA content is case-sensitive; names in A/NS content are not
+  const norm = (r: pdns.PdnsRRset) => r.records.map((rec) => (r.type === "TXT" || r.type === "CAA" ? rec.content : rec.content.toLowerCase())).sort().join(",");
   return x.ttl === y.ttl && norm(x) === norm(y);
 }
 
@@ -360,6 +387,8 @@ export interface UserView {
   answer: DnsAnswer;
   // live DNS-01 challenge values
   acmeTxt: string[];
+  // the box's ACME accounts, published as CAA
+  caaAccounts: string[];
 }
 
 /**
@@ -379,7 +408,7 @@ export async function viewUser(user: ScopeUser, routes?: Route[] | null): Promis
   const ans = answer({
     force: user.dns?.force, hostForce: user.dns?.hostForce, publicIp, probe, gatewayIps: getDnsGatewayIps(),
   });
-  return { zone: userZoneName(user.label), publicIp, probe, answer: ans, acmeTxt };
+  return { zone: userZoneName(user.label), publicIp, probe, answer: ans, acmeTxt, caaAccounts: user.dns?.caaAccounts ?? [] };
 }
 
 /** Probe the user's box now and store the result. */
@@ -410,7 +439,7 @@ export interface UserSyncResult {
 async function runSyncUser(user: ScopeUser, dryRun: boolean): Promise<UserSyncResult> {
   const view = await viewUser(user);
   const zone = view.zone;
-  const desired = desiredUserRRsets(zone, view.answer, getDnsNsHosts(), view.acmeTxt);
+  const desired = desiredUserRRsets(zone, view.answer, getDnsNsHosts(), view.acmeTxt, view.caaAccounts);
 
   let current = await pdns.getZone(zone);
   let created = false;
@@ -421,11 +450,13 @@ async function runSyncUser(user: ScopeUser, dryRun: boolean): Promise<UserSyncRe
     await liftNewZone(zone);
     current = await pdns.getZone(zone);
   }
-  // what we manage: A and NS, and the challenge TXT; anything else is left alone
+  // what we manage: A and NS, the challenge TXT and the apex CAA; anything else is left alone
   const present = new Map<string, pdns.PdnsRRset>();
   const challenge = acmeChallengeName(zone);
+  const apex = pdns.fqdn(zone);
   for (const rrset of current?.rrsets || []) {
-    if (rrset.type === "A" || rrset.type === "NS" || (rrset.type === "TXT" && rrset.name === challenge)) {
+    if (rrset.type === "A" || rrset.type === "NS" || (rrset.type === "TXT" && rrset.name === challenge)
+      || (rrset.type === "CAA" && rrset.name === apex)) {
       present.set(`${rrset.name} ${rrset.type}`, rrset);
     }
   }
@@ -754,6 +785,27 @@ export async function setForce(
   }
   // stored either way; written to a zone only where user zones run
   return { data, result: isUserZonesEnabled() ? await resyncUser(uid, data) : null };
+}
+
+/**
+ * Store the box's ACME account URIs (deduplicated, sorted), then re-sync when they changed.
+ * Same as an unchanged list: no write. Throws on an invalid list.
+ */
+export async function setCaaAccounts(
+  uid: string, accounts: string[]
+): Promise<{ changed: boolean; accounts: string[]; result: UserSyncResult | null }> {
+  const list = [...new Set(accounts)].sort();
+  if (list.length > MAX_CAA_ACCOUNTS || !list.every(isAcmeAccountUri)) {
+    throw new Error(`accounts must be at most ${MAX_CAA_ACCOUNTS} Let's Encrypt account URIs`);
+  }
+  const ref = getFirestore().collection(NSL_ROUTER_COLLECTION).doc(uid);
+  const before = ((await ref.get()).data() as NSLRouterData | undefined)?.dns?.caaAccounts ?? [];
+  if (before.join(" ") === list.join(" ")) return { changed: false, accounts: list, result: null };
+  await ref.update({ "dns.caaAccounts": list.length ? list : FieldValue.delete() });
+  const data = (await ref.get()).data() as NSLRouterData;
+  console.log(`[caa] ${data.domainName}: ${list.length ? list.join(" ") : "no account (CAA removed)"}`);
+  // stored either way; written to a zone only where user zones run
+  return { changed: true, accounts: list, result: isUserZonesEnabled() ? await resyncUser(uid, data) : null };
 }
 
 // ============================================================================
