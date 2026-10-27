@@ -2,7 +2,7 @@ import express, { Request } from "express";
 import {verifySignature} from "../library/KeyLib.js";
 import {authenticate, authenticateService, AuthUserRequest} from "./ExpressAuthenticateMiddleWare.js";
 import {checkDomainAvailability, deleteUserDomain, getUserDomain, updateUserDomain, checkOnlineStatus, getDomain, updateLastRouteRegistration, getAllUserDomains} from "./Domain.js";
-import {getServerDomain, getInactiveDomainDays} from "../configuration/config.js";
+import {getServerDomain, getInactiveDomainDays, getDnsIpZone} from "../configuration/config.js";
 import {registerRoutes, getRoutes, deleteRoutes, Route, getRoutesTTL, getActiveUserIds, getActivityTimestamp} from "./Routes.js";
 import {validateRoutes} from "./RouteValidator.js";
 import {getCACertificate, signCSR, isCAInitialized} from "./CertificateAuthority.js";
@@ -10,7 +10,7 @@ import {logDomainAssigned} from "./DomainLogger.js";
 import {runCleanup} from "./DomainCleanup.js";
 import {probeCandidates, checkRateLimit, PROBE_LIMITS, isPrivateIPv4} from "./Probe.js";
 import {recordUsage, UsageEvent, MAX_USAGE_EVENTS_PER_REQUEST} from "./Usage.js";
-import {noteRoutes, onRegistration, isUserZonesEnabled, viewUser, isInScope, isLive, resyncUser, setForce} from "./DnsZones.js";
+import {noteRoutes, onRegistration, isUserZonesEnabled, viewUser, isInScope, isLive, resyncUser, setForce, setCaaAccounts, isAcmeAccountUri, MAX_CAA_ACCOUNTS} from "./DnsZones.js";
 import {getGatewayCert, listGatewayCerts} from "./GatewayCerts.js";
 import {hopName, hopNameFor, noteHopCert} from "./HopNames.js";
 import {getDnsHealth, httpStatusFor} from "./DnsHealth.js";
@@ -87,12 +87,17 @@ export function routerAPI(expressApp: express.Application) {
    * GET /version
    * Returns API version information for client compatibility checks.
    * Clients should check this endpoint before connecting to ensure compatibility.
+   * ipZone is the zone a box's IP names live in (<ip-dashed>.<ipZone>): the agent
+   * registers its routes there and the box template routes apps on it. Absent when
+   * the deployment runs no nameserver, which leaves boxes with no direct route.
    */
   router.get('/version', (req, res) => {
+    const ipZone = getDnsIpZone();
     return res.status(200).json({
       version: 2,
       minClientVersion: 2,
       serverDomain: process.env.SERVER_DOMAIN || 'unknown',
+      ...(ipZone ? { ipZone } : {}),
     });
   });
 
@@ -1180,6 +1185,39 @@ export function routerAPI(expressApp: express.Application) {
       return res.status(500).json({ error: error.toString() });
     }
     return setOwnerForce(req, res);
+  });
+
+  /**
+   * PUT /dns/v1/caa/:userid/:sig
+   * The box reports the Let's Encrypt accounts it holds keys for (body {accounts: [uri]});
+   * the user zone then carries CAA issue/issuewild for those accounts only
+   * (phase-1.1-gateway-tls.md §7). [] removes the CAA. Credential: the box's signature
+   * over the user id. Unchanged list = no write.
+   */
+  router.put('/dns/v1/caa/:userid/:sig', async (req, res) => {
+    const { userid, sig } = req.params;
+    const accounts = req.body?.accounts;
+    try {
+      const userData = await getUserDomain(userid);
+      let isValid = false;
+      try {
+        isValid = !!userData && await verifySignature(userData.publicKey, sig, userid);
+      } catch {
+        isValid = false;
+      }
+      if (!isValid) {
+        logAuthFailure(req, 'invalid_signature', { userid, endpoint: 'dns_caa' });
+        return res.status(401).json({ error: "Invalid signature." });
+      }
+      if (!Array.isArray(accounts) || accounts.length > MAX_CAA_ACCOUNTS || !accounts.every(isAcmeAccountUri)) {
+        return res.status(400).json({ error: `accounts must be at most ${MAX_CAA_ACCOUNTS} Let's Encrypt account URIs.` });
+      }
+      const { changed, accounts: stored, result } = await setCaaAccounts(userid, accounts);
+      return res.status(200).json({ accounts: stored, changed, published: !!result });
+    } catch (error) {
+      console.error("Error in PUT /dns/v1/caa/:userid/:sig", error);
+      return res.status(500).json({ error: error.toString() });
+    }
   });
 
   expressApp.use('/', router);
