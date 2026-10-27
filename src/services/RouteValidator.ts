@@ -200,7 +200,7 @@ function handleFetchError(err: unknown, url: string): ValidationResult {
 
 /**
  * Validate a single route by testing connectivity.
- * All routes (both IP and domain types) are validated.
+ * Agent routes (both IP and domain types) are validated; tunnel routes are not.
  *
  * For HTTPS routes, races system CA and custom CA — accepts if either succeeds.
  *
@@ -208,6 +208,14 @@ function handleFetchError(err: unknown, url: string): ValidationResult {
  * @returns ValidationResult indicating if the route is reachable
  */
 export async function validateRoute(route: Route): Promise<ValidationResult> {
+  // A tunnel route points at the tunnel server, not at the box: its nginx doesn't know
+  // a bare IP, falls back to the gateway, and the 404 that comes back passed as
+  // "reachable". The tunnel registers only once its WireGuard peer is up.
+  if (route.source === 'tunnel') {
+    return { valid: true };
+  }
+
+
   // For domain routes, require domain field
   if (route.type === 'domain' && !route.domain) {
     return { valid: false, error: 'Domain is required for domain routes', url: 'N/A' };

@@ -1,6 +1,6 @@
 import { describe, it } from "mocha";
 import { expect } from "chai";
-import { normalizeRoute } from "../services/RouteValidator.js";
+import { normalizeRoute, validateRoute } from "../services/RouteValidator.js";
 
 const tunnel = { ip: "10.77.0.100", port: 80, priority: 2, source: "tunnel", scheme: "https" };
 
@@ -32,5 +32,10 @@ describe("route input (POST /routes body)", () => {
     expect(() => normalizeRoute({ ...tunnel, priority: "1" }, 0)).to.throw("priority is required");
     expect(() => normalizeRoute({ ...tunnel, scheme: "ftp" }, 0)).to.throw('scheme must be "http" or "https"');
     expect(() => normalizeRoute({ ...tunnel, type: "domain" }, 0)).to.throw("domain is required");
+  });
+
+  it("accepts a tunnel route without probing it", async () => {
+    // 10.77.0.100 is unroutable here: a probe would time out instead of passing
+    expect(await validateRoute(normalizeRoute(tunnel, 0))).to.deep.equal({ valid: true });
   });
 });
