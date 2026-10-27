@@ -14,7 +14,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { fileURLToPath } from 'url';
 import forge from 'node-forge';
-import { getCertExtraSans, getServerDomain } from '../configuration/config.js';
+import { getCertExtraSans } from '../configuration/config.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -160,7 +160,8 @@ export function getCACertificate(): string {
  *
  * @param csrPem - The CSR in PEM format
  * @param userId - The expected user ID (must match CN in CSR)
- * @param publicIp - Optional public IP to include as SAN (for nip.io support)
+ * @param publicIp - Optional public IP to include as SAN
+ * @param hopName - The box's hop name (<label>.box.<zone>), the SNI gateways use
  * @returns Signed certificate and expiry date
  */
 export async function signCSR(
@@ -244,43 +245,27 @@ export async function signCSR(
     },
   ];
 
-  // Build comprehensive SANs for all access patterns
-  // This enables HTTPS connections via:
-  // 1. Gateway-routed traffic (SNI matching *.serverDomain)
-  // 2. CF Worker direct access (*.nip.io)
-  // 3. Names the deployment adds (CERT_EXTRA_SANS)
-  // 4. The hop name gateways use as SNI (<label>.box.<zone>)
-  // 5. Direct IP access (https://[IP])
+  // SANs: one name per hop, no user-facing name (phase-1.1-gateway-tls.md §4). The
+  // gateway verifies the box by its hop name; *.<zone> and *.nip.io are gone, so cert0
+  // is valid for no name a browser asks for.
+  // 1. Names the deployment adds (CERT_EXTRA_SANS)
+  // 2. The hop name gateways use as SNI (<label>.box.<zone>)
+  // 3. Direct IP access (https://[IP])
   const altNames: Array<{type: number; value?: string; ip?: string}> = [];
 
-  // 1. Wildcard for serverDomain (gateway-routed traffic)
-  // e.g., *.inojob.com matches casaos-wisera.inojob.com
-  try {
-    const serverDomain = getServerDomain();
-    altNames.push({ type: 2, value: `*.${serverDomain}` });  // DNS wildcard
-    console.log(`[CA]   SAN: *.${serverDomain}`);
-  } catch (e) {
-    console.log('[CA]   Warning: SERVER_DOMAIN not configured, skipping wildcard SAN');
-  }
-
-  // 2. Wildcard for nip.io (CF Worker direct access)
-  // Covers any {something}.nip.io hostname
-  altNames.push({ type: 2, value: '*.nip.io' });  // DNS wildcard
-  console.log('[CA]   SAN: *.nip.io');
-
-  // 3. Deployment-specific names (CERT_EXTRA_SANS), e.g. *.ip.inojob.com
+  // 1. Deployment-specific names (CERT_EXTRA_SANS)
   for (const name of getCertExtraSans()) {
     altNames.push({ type: 2, value: name });
     console.log(`[CA]   SAN: ${name}`);
   }
 
-  // 4. Hop identity (<label>.box.<zone>): the SNI gateways use to reach this box
+  // 2. Hop identity (<label>.box.<zone>): the SNI gateways use to reach this box
   if (hopName) {
     altNames.push({ type: 2, value: hopName });
     console.log(`[CA]   SAN: ${hopName}`);
   }
 
-  // 5. Raw IP SAN (direct IP access via https://[IP])
+  // 3. Raw IP SAN (direct IP access via https://[IP])
   if (publicIp) {
     altNames.push({ type: 7, ip: publicIp });  // IP address
     console.log(`[CA]   SAN: IP ${publicIp}`);

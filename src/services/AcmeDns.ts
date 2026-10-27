@@ -5,8 +5,8 @@ import { getServerDomain } from "../configuration/config.js";
  * DNS-01 challenge store behind the acme-dns API (mesh-router-nameserver architecture
  * §7.2). A box sets `_acme-challenge.<label>.<zone>` TXT through POST /acme-dns/update
  * (acme-dns protocol, credential = its Ed25519 signature); a lego-based client through
- * httpreq (/acme-dns/present, /cleanup); the gateway certificates (GatewayCerts) write
- * here directly. DnsZones writes the live values into the user's zone on the hidden primary.
+ * httpreq (/acme-dns/present, /cleanup). DnsZones writes the live values into the user's
+ * zone on the hidden primary.
  */
 
 /** A value lives this long, then the full pass removes it from the zone. */

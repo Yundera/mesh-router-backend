@@ -25,8 +25,8 @@ function makeCsr(cn: string): string {
 
 function dnsSans(certPem: string): string[] {
   const cert = forge.pki.certificateFromPem(certPem);
-  const ext = cert.getExtension("subjectAltName") as { altNames: { type: number; value: string }[] };
-  return ext.altNames.filter((n) => n.type === 2).map((n) => n.value);
+  const ext = cert.getExtension("subjectAltName") as { altNames: { type: number; value: string }[] } | null;
+  return (ext?.altNames ?? []).filter((n) => n.type === 2).map((n) => n.value);
 }
 
 describe("Certificate SANs", () => {
@@ -50,18 +50,18 @@ describe("Certificate SANs", () => {
     process.env.CERT_EXTRA_SANS = "*.ip.inojob.com";
     const { certificate } = await ca.signCSR(makeCsr("user-1"), "user-1", "80.241.218.30");
     delete process.env.CERT_EXTRA_SANS;
-    expect(dnsSans(certificate)).to.deep.equal(["*.inojob.com", "*.nip.io", "*.ip.inojob.com"]);
+    expect(dnsSans(certificate)).to.deep.equal(["*.ip.inojob.com"]);
   });
 
   it("adds the hop name when given", async function () {
     this.timeout(30000);
     const { certificate } = await ca.signCSR(makeCsr("user-3"), "user-3", undefined, "wisera.box.inojob.com");
-    expect(dnsSans(certificate)).to.deep.equal(["*.inojob.com", "*.nip.io", "wisera.box.inojob.com"]);
+    expect(dnsSans(certificate)).to.deep.equal(["wisera.box.inojob.com"]);
   });
 
-  it("issues the usual SANs when CERT_EXTRA_SANS is unset", async function () {
+  it("issues no user-facing name: no *.<zone>, no *.nip.io", async function () {
     this.timeout(30000);
     const { certificate } = await ca.signCSR(makeCsr("user-2"), "user-2");
-    expect(dnsSans(certificate)).to.deep.equal(["*.inojob.com", "*.nip.io"]);
+    expect(dnsSans(certificate)).to.deep.equal([]);
   });
 });

@@ -8,7 +8,6 @@ import {routerAPI} from "./services/RouterAPI.js";
 import {runCleanup} from "./services/DomainCleanup.js";
 import {getCleanupCronSchedule} from "./configuration/config.js";
 import {startDnsReconciler} from "./services/DnsZones.js";
-import {startGatewayCerts} from "./services/GatewayCerts.js";
 
 import 'dotenv/config';
 
@@ -37,8 +36,6 @@ expressApp.listen(port, async () => {
 
     // Nameserver hidden primary (off unless PDNS_API_URL and DNS_IP_ZONE are set)
     startDnsReconciler();
-    // Gateway certificates for delegated users (off unless GATEWAY_ACME_DIRECTORY is set)
-    startGatewayCerts();
 
     console.log('Listening on ' + port);
 });
