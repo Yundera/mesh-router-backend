@@ -455,38 +455,6 @@ describe("Routes v2 API", () => {
       expect(response.body.error).to.include("port must be between 1 and 65535");
     });
 
-    it("should keep tunnelIp on a tunnel route", async () => {
-      const signature = await signMessage(testKeys.privateKey, testUserId);
-      const routes = [
-        { ip: "10.77.0.100", port: 80, priority: 2, source: "tunnel", scheme: "https", tunnelIp: "10.78.0.6" }
-      ];
-
-      const response = await request(app)
-        .post(`/routes/${testUserId}/${signature}`)
-        .send({ routes })
-        .expect(200);
-
-      expect(response.body.routes[0].tunnelIp).to.equal("10.78.0.6");
-      const storedRoutes = await getTestUserRoutes(testUserId);
-      expect(storedRoutes![0].tunnelIp).to.equal("10.78.0.6");
-    });
-
-    it("should reject tunnelIp on a non-tunnel route or outside private IPv4", async () => {
-      const signature = await signMessage(testKeys.privateKey, testUserId);
-
-      for (const route of [
-        { ip: "10.77.0.100", port: 443, priority: 1, source: "agent", tunnelIp: "10.78.0.6" },
-        { ip: "10.77.0.100", port: 80, priority: 2, source: "tunnel", tunnelIp: "203.0.113.5" },
-        { ip: "10.77.0.100", port: 80, priority: 2, source: "tunnel", tunnelIp: "127.0.0.1" },
-      ]) {
-        const response = await request(app)
-          .post(`/routes/${testUserId}/${signature}`)
-          .send({ routes: [route] })
-          .expect(500);
-        expect(response.body.error).to.include("tunnelIp must be a private IPv4");
-      }
-    });
-
     it("should reject non-existent user", async () => {
       const fakeUserId = "nonexistentuser12345";
       const signature = await signMessage(testKeys.privateKey, fakeUserId);

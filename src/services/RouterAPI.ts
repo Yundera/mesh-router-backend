@@ -4,11 +4,11 @@ import {authenticate, authenticateService, AuthUserRequest} from "./ExpressAuthe
 import {checkDomainAvailability, deleteUserDomain, getUserDomain, updateUserDomain, checkOnlineStatus, getDomain, updateLastRouteRegistration, getAllUserDomains} from "./Domain.js";
 import {getServerDomain, getInactiveDomainDays, getDnsIpZone} from "../configuration/config.js";
 import {registerRoutes, getRoutes, deleteRoutes, Route, getRoutesTTL, getActiveUserIds, getActivityTimestamp} from "./Routes.js";
-import {validateRoutes} from "./RouteValidator.js";
+import {validateRoutes, normalizeRoute} from "./RouteValidator.js";
 import {getCACertificate, signCSR, isCAInitialized} from "./CertificateAuthority.js";
 import {logDomainAssigned} from "./DomainLogger.js";
 import {runCleanup} from "./DomainCleanup.js";
-import {probeCandidates, checkRateLimit, PROBE_LIMITS, isPrivateIPv4} from "./Probe.js";
+import {probeCandidates, checkRateLimit, PROBE_LIMITS} from "./Probe.js";
 import {recordUsage, UsageEvent, MAX_USAGE_EVENTS_PER_REQUEST} from "./Usage.js";
 import {noteRoutes, onRegistration, isUserZonesEnabled, viewUser, isInScope, isLive, resyncUser, setForce, setCaaAccounts, isAcmeAccountUri, MAX_CAA_ACCOUNTS} from "./DnsZones.js";
 import {hopName, hopNameFor, noteHopCert} from "./HopNames.js";
@@ -329,74 +329,7 @@ export function routerAPI(expressApp: express.Application) {
       }
 
       // Validate and normalize routes
-      const validatedRoutes: Route[] = routes.map((r: any, index: number) => {
-        if (!r.ip) {
-          throw new Error(`Route ${index}: ip is required.`);
-        }
-        if (!r.port || r.port < 1 || r.port > 65535) {
-          throw new Error(`Route ${index}: port must be between 1 and 65535.`);
-        }
-        if (typeof r.priority !== 'number') {
-          throw new Error(`Route ${index}: priority is required.`);
-        }
-        if (!r.source || typeof r.source !== 'string') {
-          throw new Error(`Route ${index}: source is required.`);
-        }
-        // Validate scheme if provided
-        if (r.scheme && r.scheme !== 'http' && r.scheme !== 'https') {
-          throw new Error(`Route ${index}: scheme must be "http" or "https".`);
-        }
-        // Validate targetScheme if provided
-        if (r.targetScheme && r.targetScheme !== 'http' && r.targetScheme !== 'https') {
-          throw new Error(`Route ${index}: targetScheme must be "http" or "https".`);
-        }
-        // Validate type if provided
-        if (r.type && r.type !== 'ip' && r.type !== 'domain') {
-          throw new Error(`Route ${index}: type must be "ip" or "domain".`);
-        }
-        // Validate domain is provided when type is "domain"
-        if (r.type === 'domain' && !r.domain) {
-          throw new Error(`Route ${index}: domain is required when type is "domain".`);
-        }
-        // tunnelIp: a private IPv4 on a tunnel route (the gateway also checks it is in
-        // the tunnel subnet it routes)
-        if (r.tunnelIp !== undefined && (r.source !== 'tunnel' || !isPrivateIPv4(r.tunnelIp))) {
-          throw new Error(`Route ${index}: tunnelIp must be a private IPv4 address on a tunnel route.`);
-        }
-
-        const route: Route = {
-          ip: r.ip,
-          port: r.port,
-          priority: r.priority,
-          source: r.source,
-        };
-
-        // Add scheme if provided (defaults to "https" for backward compat)
-        if (r.scheme) {
-          route.scheme = r.scheme;
-        }
-
-        // Add targetScheme if provided (defaults to scheme for backward compat)
-        if (r.targetScheme) {
-          route.targetScheme = r.targetScheme;
-        }
-
-        // Add type if provided (defaults to "ip" for backward compat)
-        if (r.type) {
-          route.type = r.type;
-        }
-
-        // Add domain if provided
-        if (r.domain) {
-          route.domain = r.domain;
-        }
-
-        if (r.tunnelIp) {
-          route.tunnelIp = r.tunnelIp;
-        }
-
-        return route;
-      });
+      const validatedRoutes: Route[] = routes.map((r: any, index: number) => normalizeRoute(r, index));
 
       // Validate routes - all routes are validated for connectivity
       const { accepted, rejected } = await validateRoutes(validatedRoutes);

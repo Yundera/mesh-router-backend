@@ -78,7 +78,8 @@ async function dispatch(argv: string[]): Promise<number> {
     return 1;
   }
   await cmd.run(rest);
-  return 0;
+  // a command reports a failed check through process.exitCode (e.g. dns hops: not ready)
+  return typeof process.exitCode === "number" ? process.exitCode : 0;
 }
 
 dispatch(process.argv.slice(2)).then(
