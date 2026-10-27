@@ -7,10 +7,15 @@ import * as pdns from "./PowerDns.js";
  * Health of the public nameservers, for an external monitor (GET /dns/health).
  *
  * For each nameserver: it answers ip.<zone>, and holds every zone the secondaries copy
- * from the hidden primary (the catalog and its members) at the primary's serial. A
- * zone may lag for LAG_GRACE_MS (a transfer in progress, a zone just created); past
- * that it is a problem. Lag is measured between checks, so it needs the monitor's
- * polling (every few minutes) to be reported.
+ * from the hidden primary (the catalog and its members) at the primary's serial. A zone
+ * off that serial is
+ *   pending   within LAG_GRACE_MS of the primary's last change to it (PowerDns.ts
+ *             records each write): a transfer on its way, not a problem;
+ *   missing   past it, and the nameserver does not serve the zone at all;
+ *   behind    past it, at another serial.
+ * The grace runs from the change, not from when a check first saw the difference, so a
+ * zone that never arrived is reported on the first check, whatever the polling and
+ * however recently the backend restarted.
  *
  *   ok        everything in sync             → 200
  *   degraded  a nameserver down or behind,   → 500
@@ -29,9 +34,14 @@ export interface NameserverHealth {
   host: string;
   ip: string | null;
   answers: boolean;
-  /** Zones not at the primary's serial past the grace: names for system zones, a count for user zones. */
+  /** Past the grace, not served at all: names for system zones, a count for user zones. */
+  missing: string[];
+  missingUserZones: number;
+  /** Past the grace, at another serial than the primary's. */
   behind: string[];
   behindUserZones: number;
+  /** Off the primary's serial within the grace after a change (not a problem). */
+  pending: number;
 }
 
 export interface DnsHealth {
@@ -46,8 +56,6 @@ const LAG_GRACE_MS = 5 * 60 * 1000;
 const CACHE_MS = 60 * 1000;
 const QUERY_TIMEOUT_MS = 2000;
 
-/** `<ip>|<zone>` → first check that saw this nameserver off the primary's serial (ms). */
-const lagSince = new Map<string, number>();
 let cached: { at: number; health: DnsHealth } | null = null;
 let running: Promise<DnsHealth> | null = null;
 
@@ -84,6 +92,8 @@ export interface ZoneSample {
   primary: number;
   /** null = the nameserver does not answer for the zone */
   theirs: number | null;
+  /** When the primary last changed the zone (ms), null = not recently */
+  changedAt: number | null;
 }
 
 export interface ServerSample {
@@ -93,21 +103,19 @@ export interface ServerSample {
   zones: ZoneSample[];
 }
 
-/**
- * The verdict from one round of samples. Pure but for `lag`, the first-seen-behind
- * times it reads and updates (entries of zones back in sync are dropped).
- */
+/** The verdict from one round of samples. Pure. */
 export function evaluate(
   servers: ServerSample[],
   primaryReachable: boolean,
   primaryZones: number,
   now: number,
-  lag: Map<string, number> = lagSince,
 ): DnsHealth {
   const problems: string[] = [];
-  const seen = new Set<string>();
   const nameservers = servers.map((s): NameserverHealth => {
-    const out: NameserverHealth = { host: s.host, ip: s.ip, answers: s.answers, behind: [], behindUserZones: 0 };
+    const out: NameserverHealth = {
+      host: s.host, ip: s.ip, answers: s.answers,
+      missing: [], missingUserZones: 0, behind: [], behindUserZones: 0, pending: 0,
+    };
     if (!s.ip) {
       problems.push(`${s.host}: no address`);
       return out;
@@ -117,20 +125,23 @@ export function evaluate(
       return out;
     }
     for (const z of s.zones) {
-      const key = `${s.ip}|${z.zone}`;
       if (z.theirs === z.primary) continue;
-      seen.add(key);
-      const since = lag.get(key) ?? now;
-      lag.set(key, since);
-      if (now - since < LAG_GRACE_MS) continue;
-      if (z.user) out.behindUserZones++;
-      else out.behind.push(z.zone);
+      if (z.changedAt !== null && now - z.changedAt < LAG_GRACE_MS) {
+        out.pending++;
+      } else if (z.theirs === null) {
+        if (z.user) out.missingUserZones++;
+        else out.missing.push(z.zone);
+      } else {
+        if (z.user) out.behindUserZones++;
+        else out.behind.push(z.zone);
+      }
     }
+    if (out.missing.length) problems.push(`${s.host}: does not serve ${out.missing.join(", ")}`);
+    if (out.missingUserZones) problems.push(`${s.host}: does not serve ${out.missingUserZones} user zone(s)`);
     if (out.behind.length) problems.push(`${s.host}: behind the primary on ${out.behind.join(", ")}`);
     if (out.behindUserZones) problems.push(`${s.host}: behind the primary on ${out.behindUserZones} user zone(s)`);
     return out;
   });
-  for (const key of [...lag.keys()]) if (!seen.has(key)) lag.delete(key);
   if (!primaryReachable) problems.push("hidden primary unreachable: serials not compared");
 
   let status: DnsHealthStatus;
@@ -172,6 +183,13 @@ async function check(): Promise<DnsHealth> {
       console.error(`[dns-health] primary: ${(e as Error).message ?? e}`);
     }
   }
+  let changedAt: (number | null)[] = expected.map(() => null);
+  try {
+    changedAt = await pdns.zonesChangedAt(expected.map((z) => z.zone));
+  } catch (e) {
+    // no grace then: a zone off the primary's serial is reported at once
+    console.error(`[dns-health] change times: ${(e as Error).message ?? e}`);
+  }
 
   const servers: ServerSample[] = [];
   for (const host of await nameserverHosts()) {
@@ -185,7 +203,9 @@ async function check(): Promise<DnsHealth> {
     for (const ip of ips) {
       const answers = ipZone ? (await soaSerial(ip, ipZone)) !== null : true;
       const zones = answers
-        ? await Promise.all(expected.map(async (z) => ({ zone: z.zone, user: z.user, primary: z.serial, theirs: await soaSerial(ip, z.zone) })))
+        ? await Promise.all(expected.map(async (z, i) => ({
+          zone: z.zone, user: z.user, primary: z.serial, theirs: await soaSerial(ip, z.zone), changedAt: changedAt[i],
+        })))
         : [];
       servers.push({ host, ip, answers, zones });
     }

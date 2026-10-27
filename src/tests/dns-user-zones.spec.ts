@@ -196,6 +196,10 @@ describe("DNS user zones on the PowerDNS primary", function () {
     expect(z?.catalog).to.equal(`catalog.${process.env.SERVER_DOMAIN}.invalid.`);
     const catalog = await pdns.getZone(`catalog.${process.env.SERVER_DOMAIN}.invalid`);
     expect(catalog?.kind).to.equal("Producer");
+    // the write is recorded for the nameserver health's grace, for the zone and its catalog
+    const [zoneChanged, catalogChanged] = await pdns.zonesChangedAt([zone(), `catalog.${process.env.SERVER_DOMAIN}.invalid`]);
+    expect(Date.now() - (zoneChanged ?? 0)).to.be.below(60_000);
+    expect(Date.now() - (catalogChanged ?? 0)).to.be.below(60_000);
     expect(catalog?.soa_edit_api).to.equal("");
   });
 

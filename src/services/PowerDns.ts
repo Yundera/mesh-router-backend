@@ -1,4 +1,5 @@
-import { getPdnsApiKey, getPdnsApiUrl } from "../configuration/config.js";
+import { getDnsCatalogZone, getPdnsApiKey, getPdnsApiUrl } from "../configuration/config.js";
+import { getRedisClient } from "../redis/redisClient.js";
 
 /**
  * Thin client over the PowerDNS Authoritative HTTP API of the hidden primary
@@ -66,6 +67,34 @@ async function call(method: string, path: string, body?: unknown): Promise<any> 
   return text ? JSON.parse(text) : undefined;
 }
 
+/**
+ * When the primary last changed a zone, for the nameserver health (DnsHealth.ts): a
+ * secondary off the primary's serial is only late within the grace after a change.
+ * Every write goes through this module, so each records its zones here. Kept for a
+ * day; a zone with no record changed longer ago than any grace.
+ */
+const CHANGED_PREFIX = "dns:changed:";
+const CHANGED_TTL_S = 24 * 3600;
+
+async function noteChanged(zones: string[]): Promise<void> {
+  try {
+    const multi = getRedisClient().multi();
+    const now = String(Date.now());
+    for (const zone of zones) multi.set(CHANGED_PREFIX + fqdn(zone), now, "EX", CHANGED_TTL_S);
+    await multi.exec();
+  } catch (e) {
+    // the health then reports a lag without its grace; the write itself succeeded
+    console.error(`[pdns] could not record the change of ${zones.join(", ")}: ${(e as Error).message ?? e}`);
+  }
+}
+
+/** When each zone was last changed through this module (ms), null when not in the last day. */
+export async function zonesChangedAt(zones: string[]): Promise<(number | null)[]> {
+  if (zones.length === 0) return [];
+  const values = await getRedisClient().mget(...zones.map((z) => CHANGED_PREFIX + fqdn(z)));
+  return values.map((v) => (v ? Number(v) : null));
+}
+
 /** Every zone on the primary, without RRsets. */
 export async function listZones(): Promise<Omit<PdnsZone, "rrsets">[]> {
   return call("GET", "/zones");
@@ -110,6 +139,8 @@ export async function createZone(
     ...(options.catalog ? { catalog: fqdn(options.catalog) } : {}),
     ...(kind === "Producer" ? { soa_edit_api: CATALOG_SOA_EDIT_API } : {}),
   });
+  // a member changes the catalog too (PowerDNS bumps its serial on its own)
+  await noteChanged(options.catalog ? [zone, options.catalog] : [zone]);
 }
 
 /** Change a zone's SOA-EDIT-API (a catalog created before CATALOG_SOA_EDIT_API). */
@@ -119,12 +150,15 @@ export async function setSoaEditApi(zone: string, value: string): Promise<void> 
 
 export async function deleteZone(zone: string): Promise<void> {
   await call("DELETE", `/zones/${fqdn(zone)}`);
+  // its catalog, if it had one, loses a member
+  await noteChanged([zone, getDnsCatalogZone()]);
 }
 
 /** Apply RRset changes (REPLACE / DELETE) in one transaction; bumps the SOA serial. */
 export async function patchRRsets(zone: string, rrsets: PdnsRRset[]): Promise<void> {
   if (rrsets.length === 0) return;
   await call("PATCH", `/zones/${fqdn(zone)}`, { rrsets });
+  await noteChanged([zone]);
 }
 
 /**
