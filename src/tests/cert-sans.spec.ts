@@ -53,6 +53,12 @@ describe("Certificate SANs", () => {
     expect(dnsSans(certificate)).to.deep.equal(["*.inojob.com", "*.nip.io", "*.ip.inojob.com"]);
   });
 
+  it("adds the hop name when given", async function () {
+    this.timeout(30000);
+    const { certificate } = await ca.signCSR(makeCsr("user-3"), "user-3", undefined, "wisera.box.inojob.com");
+    expect(dnsSans(certificate)).to.deep.equal(["*.inojob.com", "*.nip.io", "wisera.box.inojob.com"]);
+  });
+
   it("issues the usual SANs when CERT_EXTRA_SANS is unset", async function () {
     this.timeout(30000);
     const { certificate } = await ca.signCSR(makeCsr("user-2"), "user-2");

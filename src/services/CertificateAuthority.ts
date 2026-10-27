@@ -166,7 +166,8 @@ export function getCACertificate(): string {
 export async function signCSR(
   csrPem: string,
   userId: string,
-  publicIp?: string
+  publicIp?: string,
+  hopName?: string
 ): Promise<{ certificate: string; expiresAt: Date }> {
   if (!caCert || !caKey) {
     throw new Error('Certificate Authority not initialized');
@@ -248,7 +249,8 @@ export async function signCSR(
   // 1. Gateway-routed traffic (SNI matching *.serverDomain)
   // 2. CF Worker direct access (*.nip.io)
   // 3. Names the deployment adds (CERT_EXTRA_SANS)
-  // 4. Direct IP access (https://[IP])
+  // 4. The hop name gateways use as SNI (<label>.box.<zone>)
+  // 5. Direct IP access (https://[IP])
   const altNames: Array<{type: number; value?: string; ip?: string}> = [];
 
   // 1. Wildcard for serverDomain (gateway-routed traffic)
@@ -272,7 +274,13 @@ export async function signCSR(
     console.log(`[CA]   SAN: ${name}`);
   }
 
-  // 4. Raw IP SAN (direct IP access via https://[IP])
+  // 4. Hop identity (<label>.box.<zone>): the SNI gateways use to reach this box
+  if (hopName) {
+    altNames.push({ type: 2, value: hopName });
+    console.log(`[CA]   SAN: ${hopName}`);
+  }
+
+  // 5. Raw IP SAN (direct IP access via https://[IP])
   if (publicIp) {
     altNames.push({ type: 7, ip: publicIp });  // IP address
     console.log(`[CA]   SAN: IP ${publicIp}`);
