@@ -411,9 +411,11 @@ export async function viewUser(user: ScopeUser, routes?: Route[] | null): Promis
   return { zone: userZoneName(user.label), publicIp, probe, answer: ans, acmeTxt, caaAccounts: user.dns?.caaAccounts ?? [] };
 }
 
-/** Probe the user's box now and store the result. */
+/** Probe the user's box now and store the result (through the gateway when behind NAT). */
 export async function probeUser(user: ScopeUser): Promise<DnsProbeState> {
-  const state = await probeBox(userZoneName(user.label), await currentPublicIp(user.uid));
+  const state = await probeBox(userZoneName(user.label), await currentPublicIp(user.uid), {
+    gatewayIp: getDnsGatewayIps()[0] ?? null,
+  });
   await saveProbeState(user.uid, state);
   return state;
 }

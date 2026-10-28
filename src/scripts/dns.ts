@@ -117,7 +117,7 @@ async function status(label: string | undefined, argv: string[]): Promise<void> 
   console.log(`force          ${data.dns?.force ?? "auto"}${Object.keys(data.dns?.hostForce ?? {}).length ? `   hosts: ${Object.entries(data.dns?.hostForce ?? {}).map(([h, f]) => `${h}=${f}`).join(" ")}` : ""}`);
   console.log(`public IP      ${view.publicIp ?? MISSING}`);
   const p = view.probe;
-  console.log(`probe          ${p ? `${p.at}  cert ${p.cert}${p.notAfter ? `  notAfter ${p.notAfter}` : ""}${p.issuer ? `  issuer ${p.issuer}` : ""}` : `${MISSING} (none within the last hour)`}`);
+  console.log(`probe          ${p ? `${p.at}  ${p.via === "gateway" ? "via gateway  " : ""}cert ${p.cert}${p.notAfter ? `  notAfter ${p.notAfter}` : ""}${p.issuer ? `  issuer ${p.issuer}` : ""}` : `${MISSING} (none within the last hour)`}`);
   if (p) console.log(`               ${p.reason}`);
   if (view.acmeTxt.length) console.log(`acme TXT       ${view.acmeTxt.join(" ")}`);
   console.log(`CAA accounts   ${view.caaAccounts.length ? view.caaAccounts.join(" ") : `${MISSING} (any CA may issue)`}`);

@@ -116,6 +116,26 @@ describe("DNS probe", function () {
     }
   });
 
+  it("no public IP: probes through the gateway, publicIp stays null", async () => {
+    const s = await serve(good.cert, good.key);
+    try {
+      const st = await probeBox(zone, null, { port: s.port, trustedCa: [good.ca], meshCa: [], gatewayIp: "127.0.0.1" });
+      expect(st).to.include({ cert: "trusted", via: "gateway", publicIp: null });
+      expect(st.reason).to.contain("gateway 127.0.0.1");
+      // the answer rule still needs a public IP to answer the box
+      expect(answer({ publicIp: null, probe: st, gatewayIps: GW }).kind).to.equal("gateway");
+    } finally {
+      s.close();
+    }
+    const direct = await serve(good.cert, good.key);
+    try {
+      const st = await probeBox(zone, "127.0.0.1", { port: direct.port, trustedCa: [good.ca], meshCa: [], gatewayIp: "192.0.2.1" });
+      expect(st).to.include({ via: "direct", publicIp: "127.0.0.1" });
+    } finally {
+      direct.close();
+    }
+  });
+
   it("mesh-ca: verified only by the mesh CA", async () => {
     const s = await serve(good.cert, good.key);
     try {

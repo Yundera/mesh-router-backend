@@ -8,6 +8,12 @@ import { getRedisClient } from "../redis/redisClient.js";
  * Probe behind the nameserver's answer rule (mesh-router-nameserver architecture §5):
  * can the box serve <label>.<zone> and *.<label>.<zone> itself, with a certificate a
  * browser trusts? Checked from the backend, never taken from the box's own report.
+ *
+ * A box with no public IP (behind NAT) is probed through a gateway instead: the gateway
+ * passes dot names and the user apex through raw to the box over its tunnel
+ * (phase-1.1-gateway-tls.md §3), so the handshake still reaches the box's own
+ * certificate. Such a probe only reports; the answer rule needs a public IP to answer
+ * the box directly.
  */
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -23,6 +29,8 @@ export type CertState = "trusted" | "mesh-ca" | "none";
 
 export interface DnsProbeState {
   publicIp: string | null;
+  // how the box was reached: its public IP, or a gateway's passthrough (no public IP)
+  via?: "direct" | "gateway";
   cert: CertState;
   issuer?: string;
   notAfter?: string;
@@ -39,6 +47,8 @@ export interface ProbeOptions {
   trustedCa?: (string | Buffer)[];
   // the mesh CA, recognised only to report `mesh-ca`; default CA_CERT_PATH if present
   meshCa?: (string | Buffer)[];
+  // probe through this gateway when the box has no public IP
+  gatewayIp?: string | null;
   now?: number;
 }
 
@@ -95,12 +105,15 @@ function handshake(ip: string, port: number, servername: string, ca?: (string | 
  */
 export async function probeBox(fqdn: string, publicIp: string | null, options: ProbeOptions = {}): Promise<DnsProbeState> {
   const at = new Date(options.now ?? Date.now()).toISOString();
-  if (!publicIp) {
+  const target = publicIp ?? options.gatewayIp ?? null;
+  if (!target) {
     return { publicIp: null, cert: "none", probeOk: false, reason: "no public IP (no agent route)", at };
   }
+  const via: DnsProbeState["via"] = publicIp ? "direct" : "gateway";
+  const where = publicIp ? `${target}` : `gateway ${target}`;
   const port = options.port ?? 443;
   const names = [fqdn, `mesh-probe.${fqdn}`];
-  const results = await Promise.all(names.map((name) => handshake(publicIp, port, name, options.trustedCa)));
+  const results = await Promise.all(names.map((name) => handshake(target, port, name, options.trustedCa)));
   const probeOk = results.every((r) => r.connected);
   const first = results[0];
 
@@ -111,13 +124,13 @@ export async function probeBox(fqdn: string, publicIp: string | null, options: P
     const now = options.now ?? Date.now();
     if (!notAfter || notAfter.getTime() - now < NOT_AFTER_MARGIN_MS) {
       return {
-        publicIp, cert: "none", issuer: first.issuer, notAfter: notAfter?.toISOString(), probeOk,
+        publicIp, via, cert: "none", issuer: first.issuer, notAfter: notAfter?.toISOString(), probeOk,
         reason: `certificate expires ${notAfter?.toISOString() ?? "at an unknown date"}, within the 7-day margin`, at,
       };
     }
     return {
-      publicIp, cert: "trusted", issuer: first.issuer, notAfter: notAfter.toISOString(), probeOk,
-      reason: `trusted certificate for ${fqdn} and *.${fqdn} on ${publicIp}:${port}`, at,
+      publicIp, via, cert: "trusted", issuer: first.issuer, notAfter: notAfter.toISOString(), probeOk,
+      reason: `trusted certificate for ${fqdn} and *.${fqdn} on ${where}:${port}`, at,
     };
   }
 
@@ -126,18 +139,18 @@ export async function probeBox(fqdn: string, publicIp: string | null, options: P
   const failure = results[failed];
   const reason = failure.connected
     ? `${names[failed]}: ${failure.error}`
-    : `${publicIp}:${port} unreachable (${failure.error})`;
+    : `${where}:${port} unreachable (${failure.error})`;
   if (meshCa && failure.connected) {
-    const mesh = await handshake(publicIp, port, names[failed], meshCa);
+    const mesh = await handshake(target, port, names[failed], meshCa);
     if (mesh.ok) {
       return {
-        publicIp, cert: "mesh-ca", issuer: mesh.issuer, notAfter: mesh.notAfter?.toISOString(), probeOk,
+        publicIp, via, cert: "mesh-ca", issuer: mesh.issuer, notAfter: mesh.notAfter?.toISOString(), probeOk,
         reason: `${names[failed]}: mesh CA certificate (not browser-trusted)`, at,
       };
     }
   }
   return {
-    publicIp, cert: "none", issuer: failure.issuer, notAfter: failure.notAfter?.toISOString(), probeOk, reason, at,
+    publicIp, via, cert: "none", issuer: failure.issuer, notAfter: failure.notAfter?.toISOString(), probeOk, reason, at,
   };
 }
 
