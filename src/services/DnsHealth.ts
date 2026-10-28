@@ -2,6 +2,7 @@ import { promises as dnsp } from "dns";
 import { getDnsCatalogZone, getDnsIpZone, getDnsNsHosts } from "../configuration/config.js";
 import { isDnsEnabled, isUserZonesEnabled } from "./DnsZones.js";
 import * as pdns from "./PowerDns.js";
+import { GatewayState, gatewayStates } from "./GatewayHealth.js";
 
 /**
  * Health of the public nameservers, for an external monitor (GET /dns/health).
@@ -19,7 +20,7 @@ import * as pdns from "./PowerDns.js";
  *
  *   ok        everything in sync             → 200
  *   degraded  a nameserver down or behind,   → 500
- *             or the primary unreachable
+ *             the primary unreachable, or a gateway down (GatewayHealth.ts)
  *   down      no nameserver answers ip.<zone> → 503
  *   off       no nameserver configured       → 200
  *
@@ -49,6 +50,7 @@ export interface DnsHealth {
   checkedAt: string;
   primary: { reachable: boolean; zones: number };
   nameservers: NameserverHealth[];
+  gateways: { ip: string; up: boolean; lastError?: string; changedAt?: string }[];
   problems: string[];
 }
 
@@ -109,6 +111,7 @@ export function evaluate(
   primaryReachable: boolean,
   primaryZones: number,
   now: number,
+  gateways: GatewayState[] = [],
 ): DnsHealth {
   const problems: string[] = [];
   const nameservers = servers.map((s): NameserverHealth => {
@@ -143,6 +146,9 @@ export function evaluate(
     return out;
   });
   if (!primaryReachable) problems.push("hidden primary unreachable: serials not compared");
+  for (const g of gateways) {
+    if (!g.up) problems.push(`gateway ${g.ip} down since ${g.changedAt ?? "?"}: ${g.lastError ?? "?"} (out of the answers)`);
+  }
 
   let status: DnsHealthStatus;
   if (servers.length === 0) status = "off";
@@ -157,6 +163,7 @@ export function evaluate(
     checkedAt: new Date(now).toISOString(),
     primary: { reachable: primaryReachable, zones: primaryZones },
     nameservers,
+    gateways: gateways.map(({ ip, up, lastError, changedAt }) => ({ ip, up, lastError, changedAt })),
     problems,
   };
 }
@@ -210,7 +217,7 @@ async function check(): Promise<DnsHealth> {
       servers.push({ host, ip, answers, zones });
     }
   }
-  const health = evaluate(servers, primaryReachable || !primaryConfigured, expected.length, Date.now());
+  const health = evaluate(servers, primaryReachable || !primaryConfigured, expected.length, Date.now(), gatewayStates());
   if (health.problems.length) console.warn(`[dns-health] ${health.status}: ${health.problems.join("; ")}`);
   return health;
 }

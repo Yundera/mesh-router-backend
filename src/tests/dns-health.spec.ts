@@ -28,6 +28,16 @@ function ns(host: string, ip: string | null, z: ZoneSample[] = zones(), answers 
 const NOW = 100 * MIN;
 
 describe("DNS health verdict", () => {
+  it("degraded while a gateway is down, which is named", () => {
+    const up = { ip: "192.0.2.10", up: true, streak: 0 };
+    const down = { ip: "192.0.2.11", up: false, streak: 0, lastError: "timeout", changedAt: "2026-10-28T10:00:00.000Z" };
+    const h = evaluate([ns("nss1", "192.0.2.1")], true, 3, NOW, [up, down]);
+    expect(h.status).to.equal("degraded");
+    expect(h.gateways.map((g) => g.up)).to.deep.equal([true, false]);
+    expect(h.problems).to.deep.equal(["gateway 192.0.2.11 down since 2026-10-28T10:00:00.000Z: timeout (out of the answers)"]);
+    expect(evaluate([ns("nss1", "192.0.2.1")], true, 3, NOW, [up]).status).to.equal("ok");
+  });
+
   it("ok when every nameserver answers at the primary's serials", () => {
     const h = evaluate([ns("nss1", "192.0.2.1"), ns("nss2", "192.0.2.2")], true, 3, NOW);
     expect(h.status).to.equal("ok");

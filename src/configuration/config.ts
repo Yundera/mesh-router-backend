@@ -192,6 +192,18 @@ export function getDnsGatewayIps(): string[] {
 }
 
 /**
+ * Returns the tunnel providers boxes connect to, from TUNNEL_PROVIDERS (comma-separated
+ * base URLs of each provider's registration API, e.g. https://51.15.79.231:8444). A box
+ * always keeps the provider in its own PROVIDER string and adds these. Empty when unset.
+ */
+export function getTunnelProviders(): string[] {
+  return (process.env.TUNNEL_PROVIDERS || "")
+    .split(",")
+    .map((item) => item.trim().replace(/\/+$/, ""))
+    .filter((item) => /^https?:\/\/[^\s,]+$/.test(item));
+}
+
+/**
  * Returns the public nameserver names (NS records of every user zone), from
  * DNS_NS_HOSTS (comma-separated, no trailing dots). Empty when unset.
  */

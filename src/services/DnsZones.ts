@@ -18,6 +18,7 @@ import { Route, getRoutes, getActiveUserIds } from "./Routes.js";
 import { getAllUserDomains } from "./Domain.js";
 import { DnsProbeState, getProbeState, probeBox, probeDue, saveProbeState } from "./DnsProbe.js";
 import { getAcmeTxt } from "./AcmeDns.js";
+import { healthyGatewayIps, startGatewayHealth, stopGatewayHealth } from "./GatewayHealth.js";
 import * as pdns from "./PowerDns.js";
 
 /**
@@ -406,7 +407,7 @@ export async function viewUser(user: ScopeUser, routes?: Route[] | null): Promis
     currentPublicIp(user.uid, routes), getProbeState(user.uid), getAcmeTxt(user.label),
   ]);
   const ans = answer({
-    force: user.dns?.force, hostForce: user.dns?.hostForce, publicIp, probe, gatewayIps: getDnsGatewayIps(),
+    force: user.dns?.force, hostForce: user.dns?.hostForce, publicIp, probe, gatewayIps: healthyGatewayIps(),
   });
   return { zone: userZoneName(user.label), publicIp, probe, answer: ans, acmeTxt, caaAccounts: user.dns?.caaAccounts ?? [] };
 }
@@ -414,7 +415,7 @@ export async function viewUser(user: ScopeUser, routes?: Route[] | null): Promis
 /** Probe the user's box now and store the result (through the gateway when behind NAT). */
 export async function probeUser(user: ScopeUser): Promise<DnsProbeState> {
   const state = await probeBox(userZoneName(user.label), await currentPublicIp(user.uid), {
-    gatewayIp: getDnsGatewayIps()[0] ?? null,
+    gatewayIp: healthyGatewayIps()[0] ?? null,
   });
   await saveProbeState(user.uid, state);
   return state;
@@ -523,6 +524,28 @@ export function dropUserZone(label: string): Promise<boolean> {
 let scope: Map<string, ScopeUser> | null = null;
 let scopeLoadedAt = 0;
 
+/**
+ * A user's DNS settings changed (mesh-cli runs in its own process, so the server's cached
+ * scope would otherwise keep the old ones and its next pass undo the change): the time of
+ * the last change, in Redis. A process whose mark is older reloads its scope.
+ */
+const SCOPE_CHANGED_KEY = "dns:scope:changed";
+let seenScopeMark = 0;
+
+async function markScopeChanged(): Promise<void> {
+  seenScopeMark = Date.now(); // this process already holds the change (rememberUser)
+  await getRedisClient().set(SCOPE_CHANGED_KEY, String(seenScopeMark))
+    .catch((e) => console.error(`[dns] scope change mark: ${e.message ?? e}`));
+}
+
+async function scopeMark(): Promise<number> {
+  try {
+    return Number(await getRedisClient().get(SCOPE_CHANGED_KEY)) || 0;
+  } catch {
+    return 0;
+  }
+}
+
 /** Delegated users, plus every active user (Redis activity) when shadow zones are on. */
 async function loadScope(): Promise<Map<string, ScopeUser>> {
   const out = new Map<string, ScopeUser>();
@@ -544,9 +567,11 @@ async function loadScope(): Promise<Map<string, ScopeUser>> {
 }
 
 async function getScope(force = false): Promise<Map<string, ScopeUser>> {
-  if (force || !scope || Date.now() - scopeLoadedAt > SCOPE_REFRESH_MS) {
+  const mark = await scopeMark();
+  if (force || !scope || Date.now() - scopeLoadedAt > SCOPE_REFRESH_MS || mark > seenScopeMark) {
     scope = await loadScope();
     scopeLoadedAt = Date.now();
+    seenScopeMark = Math.max(seenScopeMark, mark);
   }
   return scope;
 }
@@ -760,9 +785,11 @@ export async function resyncUser(uid: string, data: NSLRouterData | null): Promi
   if (data && isInScope(data)) {
     const user: ScopeUser = { uid, label: data.domainName, dns: data.dns };
     rememberUser(user, uid);
+    await markScopeChanged();
     return syncUser(user);
   }
   rememberUser(null, uid);
+  await markScopeChanged();
   if (data?.domainName) await dropUserZone(data.domainName);
   return null;
 }
@@ -820,9 +847,14 @@ export function startDnsReconciler(intervalMs = 60_000): void {
   const users = isUserZonesEnabled();
   if ((!allow && !users) || fullPassTimer) return;
   let running = false;
-  const pass = async () => {
-    if (running) return;
+  let again = false; // a gateway changed during a pass: run once more right after
+  const pass = async (gatewayChange = false): Promise<void> => {
+    if (running) {
+      if (gatewayChange) again = true;
+      return;
+    }
     running = true;
+    again = false;
     try {
       if (allow) {
         await syncAllow().catch((e) => console.error(`[dns] allowlist sync failed: ${e.message ?? e}`));
@@ -834,9 +866,11 @@ export function startDnsReconciler(intervalMs = 60_000): void {
     } finally {
       running = false;
     }
+    if (again) return pass();
   };
   pass();
-  fullPassTimer = setInterval(pass, intervalMs);
+  fullPassTimer = setInterval(() => void pass(), intervalMs);
+  if (users) startGatewayHealth(() => void pass(true));
   if (allow) {
     console.log(`[dns] allowlist on: ${allowZoneName()} every ${intervalMs / 1000}s, grace ${getDnsAllowGraceSeconds()}s`);
   }
@@ -851,4 +885,5 @@ export function stopDnsReconciler(): void {
     clearInterval(fullPassTimer);
     fullPassTimer = null;
   }
+  stopGatewayHealth();
 }

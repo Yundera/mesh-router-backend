@@ -2,7 +2,7 @@ import express, { Request } from "express";
 import {verifySignature} from "../library/KeyLib.js";
 import {authenticate, authenticateService, AuthUserRequest} from "./ExpressAuthenticateMiddleWare.js";
 import {checkDomainAvailability, deleteUserDomain, getUserDomain, updateUserDomain, checkOnlineStatus, getDomain, updateLastRouteRegistration, getAllUserDomains} from "./Domain.js";
-import {getServerDomain, getInactiveDomainDays, getDnsIpZone, getDnsGatewayIps} from "../configuration/config.js";
+import {getServerDomain, getInactiveDomainDays, getDnsIpZone, getDnsGatewayIps, getTunnelProviders} from "../configuration/config.js";
 import {registerRoutes, getRoutes, deleteRoutes, Route, getRoutesTTL, getActiveUserIds, getActivityTimestamp} from "./Routes.js";
 import {validateRoutes, normalizeRoute} from "./RouteValidator.js";
 import {getCACertificate, signCSR, isCAInitialized} from "./CertificateAuthority.js";
@@ -91,16 +91,21 @@ export function routerAPI(expressApp: express.Application) {
    * the deployment runs no nameserver, which leaves boxes with no direct route.
    * gatewayIps are the gateways' public IPv4s (DNS_GATEWAY_IPS): the box's Caddy accepts a
    * PROXY header only from them. Absent when unset.
+   * tunnelProviders are the tunnel providers' registration URLs (TUNNEL_PROVIDERS): a box's
+   * tunnel connects to each of them besides its own PROVIDER, so a NAT box stays reachable
+   * through every gateway's host. Absent when unset.
    */
   router.get('/version', (req, res) => {
     const ipZone = getDnsIpZone();
     const gatewayIps = getDnsGatewayIps();
+    const tunnelProviders = getTunnelProviders();
     return res.status(200).json({
       version: 2,
       minClientVersion: 2,
       serverDomain: process.env.SERVER_DOMAIN || 'unknown',
       ...(ipZone ? { ipZone } : {}),
       ...(gatewayIps.length ? { gatewayIps } : {}),
+      ...(tunnelProviders.length ? { tunnelProviders } : {}),
     });
   });
 
