@@ -38,6 +38,14 @@ describe("DNS health verdict", () => {
     expect(evaluate([ns("nss1", "192.0.2.1")], true, 3, NOW, [up]).status).to.equal("ok");
   });
 
+  it("degraded while a gateway's tunnel provider is down, which is named", () => {
+    const g = { ip: "192.0.2.11", up: true, streak: 0, tunnel: { ip: "192.0.2.11", up: false, streak: 0, lastError: "timeout", changedAt: "2026-10-28T10:00:00.000Z" } };
+    const h = evaluate([ns("nss1", "192.0.2.1")], true, 3, NOW, [g]);
+    expect(h.status).to.equal("degraded");
+    expect(h.gateways[0].tunnel?.up).to.equal(false);
+    expect(h.problems).to.deep.equal(["tunnel provider of gateway 192.0.2.11 down since 2026-10-28T10:00:00.000Z: timeout (out of NAT boxes' answers)"]);
+  });
+
   it("ok when every nameserver answers at the primary's serials", () => {
     const h = evaluate([ns("nss1", "192.0.2.1"), ns("nss2", "192.0.2.2")], true, 3, NOW);
     expect(h.status).to.equal("ok");

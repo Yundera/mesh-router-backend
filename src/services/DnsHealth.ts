@@ -50,7 +50,7 @@ export interface DnsHealth {
   checkedAt: string;
   primary: { reachable: boolean; zones: number };
   nameservers: NameserverHealth[];
-  gateways: { ip: string; up: boolean; lastError?: string; changedAt?: string }[];
+  gateways: { ip: string; up: boolean; lastError?: string; changedAt?: string; tunnel?: { up: boolean; lastError?: string; changedAt?: string } }[];
   problems: string[];
 }
 
@@ -148,6 +148,9 @@ export function evaluate(
   if (!primaryReachable) problems.push("hidden primary unreachable: serials not compared");
   for (const g of gateways) {
     if (!g.up) problems.push(`gateway ${g.ip} down since ${g.changedAt ?? "?"}: ${g.lastError ?? "?"} (out of the answers)`);
+    if (g.tunnel && !g.tunnel.up) {
+      problems.push(`tunnel provider of gateway ${g.ip} down since ${g.tunnel.changedAt ?? "?"}: ${g.tunnel.lastError ?? "?"} (out of NAT boxes' answers)`);
+    }
   }
 
   let status: DnsHealthStatus;
@@ -163,7 +166,10 @@ export function evaluate(
     checkedAt: new Date(now).toISOString(),
     primary: { reachable: primaryReachable, zones: primaryZones },
     nameservers,
-    gateways: gateways.map(({ ip, up, lastError, changedAt }) => ({ ip, up, lastError, changedAt })),
+    gateways: gateways.map(({ ip, up, lastError, changedAt, tunnel }) => ({
+      ip, up, lastError, changedAt,
+      ...(tunnel ? { tunnel: { up: tunnel.up, lastError: tunnel.lastError, changedAt: tunnel.changedAt } } : {}),
+    })),
     problems,
   };
 }

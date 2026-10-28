@@ -20,7 +20,7 @@ import { Route, getRoutes, getActiveUserIds } from "./Routes.js";
 import { getAllUserDomains } from "./Domain.js";
 import { DnsProbeState, getProbeState, probeBox, probeDue, saveProbeState } from "./DnsProbe.js";
 import { getAcmeTxt } from "./AcmeDns.js";
-import { healthyGatewayIps, startGatewayHealth, stopGatewayHealth } from "./GatewayHealth.js";
+import { boxGatewayIps, healthyGatewayIps, startGatewayHealth, stopGatewayHealth } from "./GatewayHealth.js";
 import * as pdns from "./PowerDns.js";
 import { parseZoneFile, ZoneFileError, ZoneRecord } from "./ZoneFile.js";
 
@@ -407,21 +407,31 @@ async function currentPublicIp(uid: string, routes?: Route[] | null): Promise<st
   return agentPublicIps(fresh).find((ip) => isIPv4(ip)) ?? null;
 }
 
+/** Tunnel addresses of the user's fresh tunnel routes: which gateways reach a NAT box. */
+export function tunnelIps(routes: Route[]): string[] {
+  return [...new Set(routes.filter((r) => r.source === "tunnel" && typeof r.tunnelIp === "string").map((r) => r.tunnelIp as string))];
+}
+
 /** What the user's names answer right now, from stored state (no probe, no write). */
 export async function viewUser(user: ScopeUser, routes?: Route[] | null): Promise<UserView> {
-  const [publicIp, probe, acmeTxt] = await Promise.all([
-    currentPublicIp(user.uid, routes), getProbeState(user.uid), getAcmeTxt(user.label),
+  const [fresh, probe, acmeTxt] = await Promise.all([
+    routes !== undefined ? Promise.resolve(routes || []) : getRoutes(user.uid).then((r) => r || []),
+    getProbeState(user.uid), getAcmeTxt(user.label),
   ]);
+  const publicIp = await currentPublicIp(user.uid, fresh);
   const ans = answer({
-    force: user.dns?.force, hostForce: user.dns?.hostForce, publicIp, probe, gatewayIps: healthyGatewayIps(),
+    force: user.dns?.force, hostForce: user.dns?.hostForce, publicIp, probe,
+    gatewayIps: boxGatewayIps(publicIp, tunnelIps(fresh)),
   });
   return { zone: userZoneName(user.label), publicIp, probe, answer: ans, acmeTxt, caaAccounts: user.dns?.caaAccounts ?? [] };
 }
 
 /** Probe the user's box now and store the result (through the gateway when behind NAT). */
 export async function probeUser(user: ScopeUser): Promise<DnsProbeState> {
-  const state = await probeBox(userZoneName(user.label), await currentPublicIp(user.uid), {
-    gatewayIp: healthyGatewayIps()[0] ?? null,
+  const routes = (await getRoutes(user.uid)) || [];
+  const publicIp = await currentPublicIp(user.uid, routes);
+  const state = await probeBox(userZoneName(user.label), publicIp, {
+    gatewayIp: boxGatewayIps(publicIp, tunnelIps(routes))[0] ?? null,
   });
   await saveProbeState(user.uid, state);
   return state;

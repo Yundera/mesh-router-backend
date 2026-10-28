@@ -191,6 +191,38 @@ export function getDnsGatewayIps(): string[] {
   return commaList(process.env.DNS_GATEWAY_IPS);
 }
 
+export interface GatewayTunnel {
+  /** the gateway's public IPv4 (one of DNS_GATEWAY_IPS) */
+  ip: string;
+  /** the tunnel subnet its local provider hands out, a.b.c.d/n */
+  subnet: string;
+  /** its local provider's registration API, checked at <url>/api/ping */
+  providerUrl?: string;
+}
+
+/**
+ * Returns which tunnel each gateway reaches, from DNS_GATEWAY_TUNNELS (comma-separated
+ * `<gateway ip>=<tunnel subnet>[=<provider url>]`, e.g.
+ * `151.115.96.14=10.78.0.0/16=https://inojob.com`). A gateway reaches a NAT box only
+ * through the provider on its own host, so a NAT box's names answer only the gateways
+ * whose subnet holds one of its tunnel addresses. Empty when unset: every gateway
+ * answers for every box. Malformed entries are skipped with a warning.
+ */
+export function getDnsGatewayTunnels(): GatewayTunnel[] {
+  const out: GatewayTunnel[] = [];
+  for (const entry of (process.env.DNS_GATEWAY_TUNNELS || "").split(",").map((s) => s.trim()).filter(Boolean)) {
+    const [ip, subnet, ...rest] = entry.split("=");
+    const providerUrl = rest.join("=").replace(/\/+$/, "");
+    if (!/^\d+\.\d+\.\d+\.\d+$/.test(ip ?? "") || !/^\d+\.\d+\.\d+\.\d+\/\d+$/.test(subnet ?? "")
+      || (providerUrl && !/^https?:\/\/[^\s,]+$/.test(providerUrl))) {
+      console.warn(`DNS_GATEWAY_TUNNELS: skipping malformed entry "${entry}"`);
+      continue;
+    }
+    out.push({ ip, subnet, ...(providerUrl ? { providerUrl } : {}) });
+  }
+  return out;
+}
+
 /**
  * Returns the tunnel providers boxes connect to, from TUNNEL_PROVIDERS (comma-separated
  * base URLs of each provider's registration API, e.g. https://51.15.79.231:8444). A box

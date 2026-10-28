@@ -1,7 +1,8 @@
 import { describe, it } from "mocha";
 import { expect } from "chai";
 import * as net from "net";
-import { checkGateway, GatewayState, nextState, pickHealthy } from "../services/GatewayHealth.js";
+import * as http from "http";
+import { checkGateway, checkProvider, GatewayState, inSubnet, nextState, pickForBox, pickHealthy } from "../services/GatewayHealth.js";
 
 /** Gateway health: FALL/RISE hysteresis, fail-open answer set, the handshake check. */
 
@@ -47,5 +48,57 @@ describe("Gateway health", () => {
       server.close();
     }
     expect(await checkGateway("127.0.0.1", port, "gateway.entrypoint.test.example")).to.be.a("string");
+  });
+
+  it("matches tunnel addresses to subnets", () => {
+    expect(inSubnet("10.79.0.4", "10.79.0.0/16")).to.equal(true);
+    expect(inSubnet("10.78.255.1", "10.79.0.0/16")).to.equal(false);
+    expect(inSubnet("10.79.0.4", "10.79.0.4/32")).to.equal(true);
+    expect(inSubnet("not-an-ip", "10.79.0.0/16")).to.equal(false);
+  });
+
+  describe("gateways for a NAT box", () => {
+    const G1 = "192.0.2.10";
+    const G2 = "192.0.2.11";
+    const tunnels = [{ ip: G1, subnet: "10.78.0.0/16" }, { ip: G2, subnet: "10.79.0.0/16" }];
+    const allUp = () => true;
+
+    it("answers only the gateways whose provider the box is connected to", () => {
+      expect(pickForBox([G1, G2], tunnels, allUp, ["10.78.0.4"])).to.deep.equal([G1]); // tunnel < 1.5.0
+      expect(pickForBox([G1, G2], tunnels, allUp, ["10.78.0.4", "10.79.0.7"])).to.deep.equal([G1, G2]);
+    });
+
+    it("drops a gateway whose provider is down, unless no reaching gateway is left", () => {
+      expect(pickForBox([G1, G2], tunnels, (ip) => ip !== G2, ["10.78.0.4", "10.79.0.7"])).to.deep.equal([G1]);
+      expect(pickForBox([G1, G2], tunnels, () => false, ["10.78.0.4", "10.79.0.7"])).to.deep.equal([G1, G2]);
+    });
+
+    it("leaves out an unhealthy gateway even when it reaches the box", () => {
+      expect(pickForBox([G2], tunnels, allUp, ["10.78.0.4", "10.79.0.7"])).to.deep.equal([G2]);
+    });
+
+    it("falls back to every healthy gateway when nothing matches", () => {
+      expect(pickForBox([G1, G2], [], allUp, ["10.78.0.4"])).to.deep.equal([G1, G2]); // no mapping
+      expect(pickForBox([G1, G2], tunnels, allUp, [])).to.deep.equal([G1, G2]); // no tunnelIp
+      expect(pickForBox([G1, G2], tunnels, allUp, ["10.99.0.1"])).to.deep.equal([G1, G2]); // unknown subnet
+      expect(pickForBox([G2], tunnels, allUp, ["10.78.0.4"])).to.deep.equal([G2]); // reaching gateway unhealthy
+    });
+  });
+
+  it("checks a provider's /api/ping", async function () {
+    this.timeout(10_000);
+    const server = http.createServer((req, res) => {
+      res.statusCode = req.url === "/api/ping" ? 200 : 404;
+      res.end("ok");
+    });
+    await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
+    const port = (server.address() as net.AddressInfo).port;
+    try {
+      expect(await checkProvider(`http://127.0.0.1:${port}`)).to.equal(undefined);
+      expect(await checkProvider(`http://127.0.0.1:${port}/x`)).to.equal("status 404");
+    } finally {
+      server.close();
+    }
+    expect(await checkProvider(`http://127.0.0.1:${port}`)).to.be.a("string");
   });
 });
