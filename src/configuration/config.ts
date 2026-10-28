@@ -14,8 +14,8 @@ export function getServerDomain(): string {
 /**
  * Returns extra DNS names every box certificate carries as SANs, from CERT_EXTRA_SANS
  * (comma-separated, e.g. "*.ip.inojob.com"). Empty when unset.
- * For names a deployment's boxes answer on beyond *.SERVER_DOMAIN and *.nip.io — the
- * ip.<zone> nameserver's subzone — so each deployment states its own without a code change.
+ * For names a deployment's boxes answer on beyond their hop name, so each deployment
+ * states its own without a code change.
  */
 export function getCertExtraSans(): string[] {
   return (process.env.CERT_EXTRA_SANS || "")

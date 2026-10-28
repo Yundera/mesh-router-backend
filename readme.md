@@ -45,10 +45,10 @@ Response includes both accepted and rejected routes:
 {
   "message": "Routes registered successfully.",
   "accepted": [
-    {"type": "domain", "domain": "88-187-147-189.sslip.io", "port": 443}
+    {"type": "domain", "domain": "88-187-147-189.ip.nsl.sh", "port": 443}
   ],
   "rejected": [
-    {"type": "domain", "domain": "88-187-147-189.nip.io", "port": 443, "reason": "Connection timeout"}
+    {"type": "domain", "domain": "88-187-147-189.ip.nsl.sh", "port": 80, "reason": "Connection timeout"}
   ],
   "domain": "myname.nsl.sh"
 }
@@ -73,7 +73,7 @@ Response includes both accepted and rejected routes:
 | Method | Endpoint | Auth | Description |
 |--------|----------|------|-------------|
 | GET | `/ca-cert` | Public | Get CA public certificate (PEM format) |
-| POST | `/cert/:userid/:sig` | Ed25519 Signature | Sign a CSR and get certificate (with optional nip.io SAN) |
+| POST | `/cert/:userid/:sig` | Ed25519 Signature | Sign a CSR and get certificate (hop name + optional IP SAN) |
 
 ### Example Usage
 
@@ -91,9 +91,8 @@ curl -X POST http://localhost:8192/routes/{userid}/{signature} \
   -H "Content-Type: application/json" \
   -d '{
     "routes": [
-      {"type": "ip", "ip": "88.187.147.189", "port": 443, "priority": 1, "scheme": "https"},
-      {"type": "domain", "domain": "88-187-147-189.sslip.io", "port": 443, "priority": 2, "scheme": "https"},
-      {"type": "domain", "domain": "88-187-147-189.nip.io", "port": 443, "priority": 3, "scheme": "https"}
+      {"type": "domain", "ip": "88.187.147.189", "domain": "88-187-147-189.ip.nsl.sh", "port": 443, "priority": 1, "scheme": "https"},
+      {"type": "domain", "ip": "88.187.147.189", "domain": "88-187-147-189.ip.nsl.sh", "port": 80, "priority": 1, "scheme": "http"}
     ]
   }'
 # Response: {"message":"Routes registered successfully.","accepted":[...],"rejected":[...],"domain":"myname.nsl.sh"}
@@ -106,12 +105,12 @@ curl http://localhost:8192/verify/{userid}/{signature}
 curl http://localhost:8192/ca-cert
 # Response: -----BEGIN CERTIFICATE-----\n...(PEM format)
 
-# Request certificate with nip.io SAN (for HTTPS via Cloudflare Workers)
+# Request the box certificate (hop name <label>.box.<zone>, plus an IP SAN when publicIp is given)
 curl -X POST http://localhost:8192/cert/{userid}/{signature} \
   -H "Content-Type: application/json" \
   -d '{"csr": "-----BEGIN CERTIFICATE REQUEST-----\n...", "publicIp": "2001:bc8:3021::1"}'
 # Response: {"certificate":"-----BEGIN CERTIFICATE-----\n...","expiresAt":"2026-01-30T12:00:00.000Z","caCertificate":"..."}
-# Certificate will include SAN: 2001-bc8-3021--1.nip.io
+# Certificate SANs: CERT_EXTRA_SANS, <label>.box.<zone>, IP 2001:bc8:3021::1 (no IP-encoded name)
 ```
 
 ## Getting Started
@@ -227,9 +226,9 @@ Routes are stored in Redis with automatic TTL expiration:
 | Type | Field | Used By | Example |
 |------|-------|---------|---------|
 | `ip` | `ip` | OpenResty Gateway | `88.187.147.189` |
-| `domain` | `domain` | CF Worker | `88-187-147-189.sslip.io` |
+| `domain` | `domain` | CF Worker | `88-187-147-189.ip.nsl.sh` |
 
-CF Workers cannot fetch IP addresses directly (Cloudflare error 1003), so they use domain routes with wildcard DNS services (sslip.io, nip.io) that resolve to the embedded IP.
+CF Workers cannot fetch IP addresses directly (Cloudflare error 1003), so they reach the box by an IP-encoded name: `<app>-<ip>.<IP_ZONE>` through our nameserver, `<app>-<ip>.sslip.io` as the fallback. The worker builds both from the route's `ip`. The agent registers `<ip>.<IP_ZONE>` routes; `IP_ZONE` comes from this backend's `/version` (`ipZone`, set by `DNS_IP_ZONE`).
 
 ### Route Validation
 

@@ -2,7 +2,7 @@ import express, { Request } from "express";
 import {verifySignature} from "../library/KeyLib.js";
 import {authenticate, authenticateService, AuthUserRequest} from "./ExpressAuthenticateMiddleWare.js";
 import {checkDomainAvailability, deleteUserDomain, getUserDomain, updateUserDomain, checkOnlineStatus, getDomain, updateLastRouteRegistration, getAllUserDomains} from "./Domain.js";
-import {getServerDomain, getInactiveDomainDays, getDnsIpZone} from "../configuration/config.js";
+import {getServerDomain, getInactiveDomainDays, getDnsIpZone, getDnsGatewayIps} from "../configuration/config.js";
 import {registerRoutes, getRoutes, deleteRoutes, Route, getRoutesTTL, getActiveUserIds, getActivityTimestamp} from "./Routes.js";
 import {validateRoutes, normalizeRoute} from "./RouteValidator.js";
 import {getCACertificate, signCSR, isCAInitialized} from "./CertificateAuthority.js";
@@ -11,7 +11,7 @@ import {runCleanup} from "./DomainCleanup.js";
 import {probeCandidates, checkRateLimit, PROBE_LIMITS} from "./Probe.js";
 import {recordUsage, UsageEvent, MAX_USAGE_EVENTS_PER_REQUEST} from "./Usage.js";
 import {noteRoutes, onRegistration, isUserZonesEnabled, viewUser, isInScope, isLive, resyncUser, setForce, setCaaAccounts, isAcmeAccountUri, MAX_CAA_ACCOUNTS} from "./DnsZones.js";
-import {hopName, hopNameFor, noteHopCert} from "./HopNames.js";
+import {hopName, hopNameFor, noteHopCert, acceptsProxyProtocol, setProxyProtocol} from "./HopNames.js";
 import {getDnsHealth, httpStatusFor} from "./DnsHealth.js";
 import {NSLRouterData} from "../DataBaseDTO/DataBaseNSLRouter.js";
 import {acmeLabelFromFqdn, addAcmeTxt, isAcmeTxtValue, removeAcmeTxt, takeAcmeUpdate} from "./AcmeDns.js";
@@ -89,14 +89,18 @@ export function routerAPI(expressApp: express.Application) {
    * ipZone is the zone a box's IP names live in (<ip-dashed>.<ipZone>): the agent
    * registers its routes there and the box template routes apps on it. Absent when
    * the deployment runs no nameserver, which leaves boxes with no direct route.
+   * gatewayIps are the gateways' public IPv4s (DNS_GATEWAY_IPS): the box's Caddy accepts a
+   * PROXY header only from them. Absent when unset.
    */
   router.get('/version', (req, res) => {
     const ipZone = getDnsIpZone();
+    const gatewayIps = getDnsGatewayIps();
     return res.status(200).json({
       version: 2,
       minClientVersion: 2,
       serverDomain: process.env.SERVER_DOMAIN || 'unknown',
       ...(ipZone ? { ipZone } : {}),
+      ...(gatewayIps.length ? { gatewayIps } : {}),
     });
   });
 
@@ -489,6 +493,8 @@ export function routerAPI(expressApp: express.Application) {
 
       // SNI for gateway -> box connections, once the box's certificate carries it
       const hop = await hopNameFor(domainData.uid, domainData.domain.domainName);
+      // the box takes a PROXY v2 header from the gateway (passthrough keeps the client IP)
+      const proxyProtocol = await acceptsProxyProtocol(domainData.uid);
 
       return res.status(200).json({
         userId: domainData.uid,
@@ -498,6 +504,7 @@ export function routerAPI(expressApp: express.Application) {
         routesTtl,  // Seconds until routes expire (-2 if no routes)
         lastSeenOnline: domainData.domain.lastRouteRegistration || null,  // Updated on route registration
         ...(hop ? { hopName: hop } : {}),
+        ...(proxyProtocol ? { proxyProtocol: true } : {}),
         ...(dns ? { dns } : {}),
       });
     } catch (error) {
@@ -788,7 +795,7 @@ export function routerAPI(expressApp: express.Application) {
    * Request body:
    * {
    *   csr: "-----BEGIN CERTIFICATE REQUEST-----\n...",
-   *   publicIp?: "192.168.1.1"  // Optional: adds nip.io hostname to certificate SAN
+   *   publicIp?: "192.168.1.1"  // Optional: adds an IP SAN
    * }
    *
    * Response:
@@ -801,9 +808,8 @@ export function routerAPI(expressApp: express.Application) {
    * The signature must be a valid Ed25519 signature of the userid.
    * The CSR Common Name (CN) must match the userid.
    *
-   * If publicIp is provided, the certificate will include a Subject Alternative Name (SAN)
-   * for the nip.io hostname (e.g., 192.168.1.1.nip.io). This enables HTTPS connections
-   * from Cloudflare Workers which cannot fetch raw IP addresses.
+   * The certificate carries CERT_EXTRA_SANS, the box's hop name (<label>.box.<zone>, the
+   * SNI gateways use) and, if publicIp is provided, an IP SAN. No IP-encoded name.
    */
   router.post('/cert/:userid/:sig', async (req, res) => {
     const { userid, sig } = req.params;
@@ -838,7 +844,7 @@ export function routerAPI(expressApp: express.Application) {
         return res.status(401).json({ error: "Invalid signature." });
       }
 
-      // Sign the CSR (with optional nip.io SAN, and the box's hop name)
+      // Sign the CSR (the box's hop name, and an IP SAN when publicIp is given)
       const { certificate, expiresAt } = await signCSR(csr, userid, publicIp, hopName(userData.domainName));
       await noteHopCert(userid, expiresAt);
       const caCertificate = getCACertificate();
@@ -1118,6 +1124,38 @@ export function routerAPI(expressApp: express.Application) {
       return res.status(200).json({ accounts: stored, changed, published: !!result });
     } catch (error) {
       console.error("Error in PUT /dns/v1/caa/:userid/:sig", error);
+      return res.status(500).json({ error: error.toString() });
+    }
+  });
+
+  /**
+   * PUT /hop/v1/proxy-protocol/:userid/:sig
+   * The box reports whether its running Caddy accepts a PROXY v2 header from the gateways
+   * (body {enabled: boolean}); /resolve/v2 then says `proxyProtocol: true` until the report
+   * expires (HopNames.ts). Credential: the box's signature over the user id.
+   */
+  router.put('/hop/v1/proxy-protocol/:userid/:sig', async (req, res) => {
+    const { userid, sig } = req.params;
+    const enabled = req.body?.enabled;
+    try {
+      const userData = await getUserDomain(userid);
+      let isValid = false;
+      try {
+        isValid = !!userData && await verifySignature(userData.publicKey, sig, userid);
+      } catch {
+        isValid = false;
+      }
+      if (!isValid) {
+        logAuthFailure(req, 'invalid_signature', { userid, endpoint: 'hop_proxy_protocol' });
+        return res.status(401).json({ error: "Invalid signature." });
+      }
+      if (typeof enabled !== "boolean") {
+        return res.status(400).json({ error: "enabled must be a boolean." });
+      }
+      await setProxyProtocol(userid, enabled);
+      return res.status(200).json({ enabled });
+    } catch (error) {
+      console.error("Error in PUT /hop/v1/proxy-protocol/:userid/:sig", error);
       return res.status(500).json({ error: error.toString() });
     }
   });
