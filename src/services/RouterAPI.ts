@@ -11,7 +11,7 @@ import {runCleanup} from "./DomainCleanup.js";
 import {probeCandidates, checkRateLimit, PROBE_LIMITS} from "./Probe.js";
 import {recordUsage, UsageEvent, MAX_USAGE_EVENTS_PER_REQUEST} from "./Usage.js";
 import {noteRoutes, onRegistration, isUserZonesEnabled, viewUser, isInScope, isLive, resyncUser, setForce, setCaaAccounts, isAcmeAccountUri, MAX_CAA_ACCOUNTS} from "./DnsZones.js";
-import {hopName, hopNameFor, noteHopCert, acceptsProxyProtocol, setProxyProtocol} from "./HopNames.js";
+import {hopName, acceptsProxyProtocol, setProxyProtocol} from "./HopNames.js";
 import {getDnsHealth, httpStatusFor} from "./DnsHealth.js";
 import {NSLRouterData} from "../DataBaseDTO/DataBaseNSLRouter.js";
 import {acmeLabelFromFqdn, addAcmeTxt, isAcmeTxtValue, removeAcmeTxt, takeAcmeUpdate} from "./AcmeDns.js";
@@ -491,8 +491,6 @@ export function routerAPI(expressApp: express.Application) {
       // What our nameservers answer for the user's names (only when user zones are on)
       const dns = await dnsSummary(domainData.uid, domainData.domain, routes);
 
-      // SNI for gateway -> box connections, once the box's certificate carries it
-      const hop = await hopNameFor(domainData.uid, domainData.domain.domainName);
       // the box takes a PROXY v2 header from the gateway (passthrough keeps the client IP)
       const proxyProtocol = await acceptsProxyProtocol(domainData.uid);
 
@@ -503,7 +501,6 @@ export function routerAPI(expressApp: express.Application) {
         routes: routes || [],  // Empty array if no routes registered
         routesTtl,  // Seconds until routes expire (-2 if no routes)
         lastSeenOnline: domainData.domain.lastRouteRegistration || null,  // Updated on route registration
-        ...(hop ? { hopName: hop } : {}),
         ...(proxyProtocol ? { proxyProtocol: true } : {}),
         ...(dns ? { dns } : {}),
       });
@@ -846,7 +843,6 @@ export function routerAPI(expressApp: express.Application) {
 
       // Sign the CSR (the box's hop name, and an IP SAN when publicIp is given)
       const { certificate, expiresAt } = await signCSR(csr, userid, publicIp, hopName(userData.domainName));
-      await noteHopCert(userid, expiresAt);
       const caCertificate = getCACertificate();
 
       console.log('Certificate issued', { userid, expiresAt: expiresAt.toISOString(), publicIp: publicIp || 'none' });

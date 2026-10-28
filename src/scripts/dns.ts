@@ -8,8 +8,6 @@
  *   dns acme <user>                            live DNS-01 challenge values and the update counter
  *   dns sync [<user>] [--dry-run]              reconcile now: one user's zone, or allowlist + every zone
  *   dns allow [--json]                         ip.<zone> allowlist: IPs, last registration, expiry
- *   dns hops [--json]                          boxes with routes whose cert0 lacks the hop name
- *                                              (gateway 1.6 readiness; exit 1 while any does)
  *
  * Talks to Firestore, Redis and the PowerDNS hidden primary with the backend's own env
  * (REDIS_URL, PDNS_API_URL, PDNS_API_KEY, DNS_IP_ZONE, DNS_GATEWAY_IPS, DNS_NS_HOSTS).
@@ -40,7 +38,6 @@ import {
 import { getZone } from "../services/PowerDns.js";
 import { getDnsAllowGraceSeconds, getDnsNsHosts, isDnsShadowZones } from "../configuration/config.js";
 import { flagValue, hasFlag, MISSING, positionals, renderTable } from "../cli/format.js";
-import { getHopCoverage } from "../services/HopNames.js";
 
 const USAGE = [
   "Usage: mesh-cli dns <subcommand>   (flags after the arguments)",
@@ -51,7 +48,6 @@ const USAGE = [
   "  acme <user>",
   "  sync [<user>] [--dry-run]",
   "  allow [--json]",
-  "  hops [--json]",
 ].join("\n");
 
 function requireUserZones(): void {
@@ -243,30 +239,6 @@ async function allow(argv: string[]): Promise<void> {
   );
 }
 
-/**
- * Gateway 1.6 sends <label>.box.<zone> to every box and trusts the mesh CA only: a box whose
- * cert0 predates the hop SAN (backend 2.0.40) gets a 502 through it. Ready = every box with
- * routes holds a hop certificate (cert:hop:<uid>, set when its cert0 was signed).
- */
-async function hops(argv: string[]): Promise<void> {
-  const cov = await getHopCoverage();
-  const ready = cov.missing.length === 0;
-  if (hasFlag(argv, "json")) {
-    console.log(JSON.stringify({ ready, boxes: cov.boxes.length, missing: cov.missing }, null, 2));
-  } else if (ready) {
-    console.log(`ready: ${cov.boxes.length}/${cov.boxes.length} boxes with routes hold their hop name`);
-  } else {
-    initializeFb();
-    const rows = await Promise.all(cov.missing.map(async (b) => {
-      const data = await getUserDomain(b.uid).catch(() => null);
-      return [data?.domainName ?? MISSING, b.uid, b.sources.join(",")];
-    }));
-    console.log(`not ready: ${cov.missing.length} of ${cov.boxes.length} boxes with routes have no hop name yet\n`);
-    renderTable(["user", "uid", "routes"], rows);
-  }
-  if (!ready) process.exitCode = 1;
-}
-
 export async function main(argv: string[]): Promise<void> {
   const [sub, arg1, arg2] = positionals(argv);
   switch (sub) {
@@ -277,7 +249,6 @@ export async function main(argv: string[]): Promise<void> {
     case "acme": return acme(arg1);
     case "sync": return sync(arg1, argv);
     case "allow": return allow(argv);
-    case "hops": return hops(argv);
     default:
       console.log(USAGE);
       if (sub) throw new Error(`unknown dns subcommand '${sub}'`);
