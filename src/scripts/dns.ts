@@ -8,10 +8,14 @@
  *   dns acme <user>                            live DNS-01 challenge values and the update counter
  *   dns sync [<user>] [--dry-run]              reconcile now: one user's zone, or allowlist + every zone
  *   dns allow [--json]                         ip.<zone> allowlist: IPs, last registration, expiry
+ *   dns zone [--dry-run]                       sync the apex zone (DNS_STATIC_ZONE_FILE + backend records)
+ *   dns zone diff [--ns <ip,…>]                compare it with what nameservers answer (default: the
+ *                                              zone's current public NS, i.e. Cloudflare before the switch)
  *
  * Talks to Firestore, Redis and the PowerDNS hidden primary with the backend's own env
  * (REDIS_URL, PDNS_API_URL, PDNS_API_KEY, DNS_IP_ZONE, DNS_GATEWAY_IPS, DNS_NS_HOSTS).
- * Delegation itself is an NS record added by hand where the parent zone lives.
+ * Delegation of a user zone is an NS record in the parent: written by the backend when the apex
+ * zone is ours (DNS_STATIC_ZONE_FILE), added by hand where the parent lives otherwise.
  */
 import { promises as dnsp } from "dns";
 import { FieldValue, getFirestore } from "firebase-admin/firestore";
@@ -21,22 +25,25 @@ import { NSL_ROUTER_COLLECTION, NSLRouterData } from "../DataBaseDTO/DataBaseNSL
 import { getDomain, getUserDomain } from "../services/Domain.js";
 import {
   allowZoneName,
+  isApexZoneEnabled,
   isDnsEnabled,
   isInScope,
   isUserZonesEnabled,
   listAllowed,
+  loadApexRRsets,
   probeUser,
   resyncUser,
   ScopeUser,
   setForce,
   syncAllow,
   syncAllUsers,
+  syncApex,
   syncUser,
   userZoneName,
   viewUser,
 } from "../services/DnsZones.js";
-import { getZone } from "../services/PowerDns.js";
-import { getDnsAllowGraceSeconds, getDnsNsHosts, isDnsShadowZones } from "../configuration/config.js";
+import { getZone, PdnsRRset } from "../services/PowerDns.js";
+import { getDnsAllowGraceSeconds, getDnsNsHosts, getDnsStaticZoneFile, getServerDomain, isDnsShadowZones } from "../configuration/config.js";
 import { flagValue, hasFlag, MISSING, positionals, renderTable } from "../cli/format.js";
 
 const USAGE = [
@@ -48,6 +55,8 @@ const USAGE = [
   "  acme <user>",
   "  sync [<user>] [--dry-run]",
   "  allow [--json]",
+  "  zone [--dry-run]",
+  "  zone diff [--ns <ip,…>]",
 ].join("\n");
 
 function requireUserZones(): void {
@@ -139,7 +148,9 @@ async function delegate(label: string | undefined, onOff: string | undefined): P
   await resyncUser(uid, data);
   const zone = userZoneName(data.domainName);
   const ns = getDnsNsHosts().map((h) => `${zone}. NS ${h}.`);
-  if (onOff === "on") {
+  if (isApexZoneEnabled()) {
+    console.log(`${zone}: ${onOff === "on" ? "delegated" : "not delegated any more"}; the apex zone's NS records follow on the next pass (dns zone).`);
+  } else if (onOff === "on") {
     console.log(`${zone}: delegated. Its zone is on our nameservers. To make it live, add in the parent zone:`);
     ns.forEach((r) => console.log(`  ${r}`));
   } else {
@@ -222,6 +233,11 @@ async function sync(target: string | undefined, argv: string[]): Promise<void> {
     console.log(`user zones: ${r.synced} synced, ${r.probed} probed` +
       `${r.removed.length ? `, removed ${r.removed.join(" ")}` : ""}${r.failed.length ? `, FAILED ${r.failed.join(" ")}` : ""}`);
   }
+  if (isApexZoneEnabled()) {
+    const r = await syncApex();
+    console.log(`apex zone ${r.zone}: ${r.changed.length ? `${r.changed.length} RRset(s) changed` : "no change"}` +
+      `${r.skipped.length ? `, ${r.skipped.length} file record(s) left out (dns zone)` : ""}`);
+  }
 }
 
 async function allow(argv: string[]): Promise<void> {
@@ -239,6 +255,98 @@ async function allow(argv: string[]): Promise<void> {
   );
 }
 
+function requireApexZone(): void {
+  if (!isApexZoneEnabled()) {
+    throw new Error("the apex zone is not configured: DNS_STATIC_ZONE_FILE, PDNS_API_URL, DNS_GATEWAY_IPS and DNS_NS_HOSTS must be set");
+  }
+}
+
+async function zoneSync(argv: string[]): Promise<void> {
+  requireApexZone();
+  initializeFb();
+  const dryRun = hasFlag(argv, "dry-run");
+  if (dryRun) console.log("(dry run: nothing written)");
+  const r = await syncApex(dryRun);
+  console.log(`${r.zone}   (${getDnsStaticZoneFile()})${r.created ? "   zone created" : ""}`);
+  (r.changed.length ? r.changed : ["no change"]).forEach((c) => console.log(`  ${c}`));
+  if (r.skipped.length) {
+    console.log("\nleft out of the zone file:");
+    r.skipped.forEach((l) => console.log(`  ${l}`));
+  }
+}
+
+/** The records `server` answers for name/type, in PowerDNS content form, or an error code. */
+async function answersAt(server: string, name: string, type: string): Promise<string[] | string> {
+  const resolver = new dnsp.Resolver({ timeout: 3000, tries: 2 });
+  resolver.setServers([server]);
+  const dot = (n: string) => `${n.replace(/\.$/, "")}.`.toLowerCase();
+  try {
+    switch (type) {
+      case "A": return await resolver.resolve4(name);
+      case "AAAA": return await resolver.resolve6(name);
+      case "CNAME": return (await resolver.resolveCname(name)).map(dot);
+      case "NS": return (await resolver.resolveNs(name)).map(dot);
+      case "MX": return (await resolver.resolveMx(name)).map((m) => `${m.priority} ${dot(m.exchange)}`);
+      case "SRV": return (await resolver.resolveSrv(name)).map((r) => `${r.priority} ${r.weight} ${r.port} ${dot(r.name)}`);
+      case "TXT": return (await resolver.resolveTxt(name)).map((chunks) => chunks.map((c) => `"${c}"`).join(" "));
+      case "CAA": return (await resolver.resolveCaa(name)).map((c) => {
+        const [tag, value] = Object.entries(c).find(([k]) => k !== "critical") ?? ["?", ""];
+        return `${c.critical} ${tag} "${value}"`;
+      });
+      default: return "(type not compared)";
+    }
+  } catch (e) {
+    return `(${(e as NodeJS.ErrnoException).code ?? (e as Error).message})`;
+  }
+}
+
+/** TXT compared on the text (a resolver joins or splits strings its own way), the rest case-insensitive. */
+function normalized(type: string, values: string[]): string {
+  const one = (v: string) => (type === "TXT" ? v.replace(/"\s+"/g, "").replace(/^"|"$/g, "") : v.toLowerCase());
+  return values.map(one).sort().join(" | ");
+}
+
+async function zoneDiff(argv: string[]): Promise<void> {
+  if (!getDnsStaticZoneFile()) throw new Error("DNS_STATIC_ZONE_FILE is not set");
+  initializeFb();
+  const zone = getServerDomain();
+  const { rrsets, skipped } = await loadApexRRsets();
+
+  let servers = (flagValue(argv, "ns") || "").split(",").filter(Boolean).map((ip) => ({ name: ip, ip }));
+  if (!servers.length) {
+    for (const host of await dnsp.resolveNs(zone)) {
+      for (const ip of await dnsp.resolve4(host).catch(() => [] as string[])) servers.push({ name: host, ip });
+    }
+    servers = servers.slice(0, 1); // the zone's public servers all hold the same data
+  }
+  for (const server of servers) {
+    console.log(`${zone}: zone file + backend vs ${server.name} (${server.ip})\n`);
+    const rows: string[][] = [];
+    let differ = 0;
+    for (const want of rrsets as PdnsRRset[]) {
+      const got = await answersAt(server.ip, want.name, want.type);
+      const wanted = want.records.map((r) => r.content);
+      const same = Array.isArray(got) && normalized(want.type, got) === normalized(want.type, wanted);
+      if (!same) differ++;
+      rows.push([same ? "=" : "≠", want.name, want.type, wanted.join(" | "), same ? "" : Array.isArray(got) ? got.join(" | ") || MISSING : got]);
+    }
+    renderTable(["", "name", "type", "ours", "theirs (when different)"], rows);
+    console.log(`\n${rrsets.length - differ} same, ${differ} different. Proxied Cloudflare names answer Cloudflare's addresses;` +
+      " a delegation answers as a referral, which shows as an error here.");
+  }
+  if (skipped.length) {
+    console.log("\nleft out of the zone file:");
+    skipped.forEach((l) => console.log(`  ${l}`));
+  }
+  console.log("\nA name only the other side has is not listed: compare with its export for those.");
+}
+
+async function zoneCommand(arg: string | undefined, argv: string[]): Promise<void> {
+  if (arg === "diff") return zoneDiff(argv);
+  if (arg === undefined) return zoneSync(argv);
+  throw new Error("usage: mesh-cli dns zone [--dry-run] | dns zone diff [--ns <ip,…>]");
+}
+
 export async function main(argv: string[]): Promise<void> {
   const [sub, arg1, arg2] = positionals(argv);
   switch (sub) {
@@ -249,6 +357,7 @@ export async function main(argv: string[]): Promise<void> {
     case "acme": return acme(arg1);
     case "sync": return sync(arg1, argv);
     case "allow": return allow(argv);
+    case "zone": return zoneCommand(arg1, argv);
     default:
       console.log(USAGE);
       if (sub) throw new Error(`unknown dns subcommand '${sub}'`);

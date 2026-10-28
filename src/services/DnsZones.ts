@@ -1,5 +1,6 @@
 import { isIPv4, isIPv6 } from "net";
 import { promises as dnsp } from "dns";
+import { promises as fsp } from "fs";
 import { getRedisClient } from "../redis/redisClient.js";
 import { FieldValue, getFirestore } from "firebase-admin/firestore";
 import {
@@ -8,6 +9,7 @@ import {
   getDnsGatewayIps,
   getDnsIpZone,
   getDnsNsHosts,
+  getDnsStaticZoneFile,
   getPdnsApiUrl,
   getServerDomain,
   isDnsShadowZones,
@@ -20,6 +22,7 @@ import { DnsProbeState, getProbeState, probeBox, probeDue, saveProbeState } from
 import { getAcmeTxt } from "./AcmeDns.js";
 import { healthyGatewayIps, startGatewayHealth, stopGatewayHealth } from "./GatewayHealth.js";
 import * as pdns from "./PowerDns.js";
+import { parseZoneFile, ZoneFileError, ZoneRecord } from "./ZoneFile.js";
 
 /**
  * Backend side of the nameserver (mesh-router-nameserver docs/architecture.md §10):
@@ -33,6 +36,9 @@ import * as pdns from "./PowerDns.js";
  *   within the grace period.
  * - per-user zones <label>.<SERVER_DOMAIN>: box IP or gateway per the answer rule, for
  *   delegated users (and every active user in shadow mode, DNS_SHADOW_ZONES=1).
+ * - the apex zone <SERVER_DOMAIN> itself, when DNS_STATIC_ZONE_FILE is set: the static
+ *   file plus what the backend derives (apex NS, the * wildcard to the gateways, the
+ *   ip.<zone> and delegated users' NS).
  */
 
 /** Redis sorted set: IP → last time an agent registered it (ms). */
@@ -654,6 +660,173 @@ export async function delegatedUsers(): Promise<ScopeUser[]> {
   return [...(await getScope()).values()].filter((u) => u.dns?.delegated);
 }
 
+// --- the apex zone: <SERVER_DOMAIN> itself (architecture §9, §10.2) -----------
+//
+// The static zone file (DNS_STATIC_ZONE_FILE, server config bind-mounted next to the
+// backend) holds what nobody derives: the apex address, mail, site verification, the
+// nameservers' own addresses. The backend adds the rest and owns the whole zone: a
+// record on the primary that is in neither is deleted. Until the registrar points the
+// domain at our nameservers the zone is served but asked by nobody (`dig @ns`).
+
+export function isApexZoneEnabled(): boolean {
+  return !!getDnsStaticZoneFile() && isUserZonesEnabled();
+}
+
+export interface ApexInput {
+  zone: string;
+  records: ZoneRecord[];
+  nsHosts: string[];
+  gatewayIps: string[];
+  /** DNS_IP_ZONE: delegated when it sits under the zone. */
+  ipZone?: string;
+  /** Labels of the delegated users: <label>.<zone> NS our nameservers. */
+  delegated: string[];
+}
+
+/**
+ * The RRsets the apex zone should hold (SOA is PowerDNS's) and the static records left
+ * out, with why: a name+type the backend owns, or a name at or below a delegation.
+ * Throws a ZoneFileError when the file contradicts itself (CNAME beside other data).
+ */
+export function desiredApexRRsets(input: ApexInput): { rrsets: pdns.PdnsRRset[]; skipped: string[] } {
+  const apex = pdns.fqdn(input.zone).toLowerCase();
+  const nsRecords = [...input.nsHosts].map((h) => ({ content: pdns.fqdn(h), disabled: false }))
+    .sort((x, y) => x.content.localeCompare(y.content));
+  const ns = (name: string): pdns.PdnsRRset => ({ name, type: "NS", ttl: NS_TTL, records: nsRecords });
+
+  const cuts: string[] = [];
+  const dynamic: pdns.PdnsRRset[] = [ns(apex)];
+  if (input.gatewayIps.length) {
+    dynamic.push({
+      name: `*.${apex}`, type: "A", ttl: ANSWER_TTL,
+      records: [...input.gatewayIps].sort().map((content) => ({ content, disabled: false })),
+    });
+  }
+  const ipZone = input.ipZone ? pdns.fqdn(input.ipZone).toLowerCase() : null;
+  if (ipZone && ipZone.endsWith(`.${apex}`)) cuts.push(ipZone);
+  for (const label of [...input.delegated].sort()) cuts.push(pdns.fqdn(userZoneName(label)).toLowerCase());
+  dynamic.push(...cuts.map(ns));
+
+  const owned = new Set(dynamic.map((r) => `${r.name} ${r.type}`));
+  const groups = new Map<string, pdns.PdnsRRset>();
+  const skipped: string[] = [];
+  for (const rec of input.records) {
+    const key = `${rec.name} ${rec.type}`;
+    const cut = cuts.find((c) => rec.name === c || rec.name.endsWith(`.${c}`));
+    if (owned.has(key)) {
+      skipped.push(`line ${rec.line}: ${key} is set by the backend`);
+      continue;
+    }
+    if (cut) {
+      skipped.push(`line ${rec.line}: ${key} is at or below the delegation of ${cut}`);
+      continue;
+    }
+    const group = groups.get(key) ?? { name: rec.name, type: rec.type, ttl: rec.ttl, records: [] };
+    // one TTL per RRset: the lowest the file gives
+    group.ttl = Math.min(group.ttl, rec.ttl);
+    if (!group.records.some((r) => r.content === rec.content)) group.records.push({ content: rec.content, disabled: false });
+    groups.set(key, group);
+  }
+
+  const rrsets = [...dynamic, ...groups.values()];
+  const errors: string[] = [];
+  for (const cname of rrsets.filter((r) => r.type === "CNAME")) {
+    const others = rrsets.filter((r) => r.name === cname.name && r.type !== "CNAME");
+    if (others.length) errors.push(`${cname.name} has a CNAME and ${others.map((r) => r.type).join(", ")}: a CNAME must be alone`);
+    if (cname.records.length > 1) errors.push(`${cname.name} has ${cname.records.length} CNAME targets: one only`);
+  }
+  if (errors.length) throw new ZoneFileError(errors);
+  return { rrsets, skipped };
+}
+
+export interface ApexSyncResult {
+  zone: string;
+  created: boolean;
+  changed: string[];
+  skipped: string[];
+}
+
+/** The zone file read now, plus the backend's records: what the apex zone should hold. */
+export async function loadApexRRsets(): Promise<{ rrsets: pdns.PdnsRRset[]; skipped: string[] }> {
+  const file = getDnsStaticZoneFile();
+  if (!file) throw new Error("DNS_STATIC_ZONE_FILE is not set");
+  const zone = getServerDomain();
+  const records = parseZoneFile(await fsp.readFile(file, "utf8"), zone);
+  return desiredApexRRsets({
+    zone, records, nsHosts: getDnsNsHosts(), gatewayIps: healthyGatewayIps(), ipZone: getDnsIpZone(),
+    delegated: (await delegatedUsers()).map((u) => u.label),
+  });
+}
+
+async function runSyncApex(dryRun: boolean): Promise<ApexSyncResult> {
+  const zone = getServerDomain();
+  const { rrsets: desired, skipped } = await loadApexRRsets();
+
+  let current = await pdns.getZone(zone);
+  let created = false;
+  if (!current && !dryRun) {
+    const catalog = await ensureCatalog([]);
+    await pdns.createZone(zone, "Primary", { catalog, nameservers: getDnsNsHosts() });
+    created = true;
+    await liftNewZone(zone);
+    current = await pdns.getZone(zone);
+  }
+  // the whole zone is ours but the SOA
+  const present = new Map<string, pdns.PdnsRRset>();
+  for (const rrset of current?.rrsets || []) {
+    if (rrset.type !== "SOA") present.set(`${rrset.name.toLowerCase()} ${rrset.type}`, rrset);
+  }
+  const changes: pdns.PdnsRRset[] = [];
+  const changed: string[] = [];
+  const wanted = new Set<string>();
+  for (const want of desired) {
+    const key = `${want.name} ${want.type}`;
+    wanted.add(key);
+    const have = present.get(key);
+    if (!sameRecords(have, want)) {
+      changes.push({ ...want, changetype: "REPLACE" });
+      changed.push(`${key} ${have ? `${have.records.map((r) => r.content).join(",")} (${have.ttl})` : "—"} → ${want.records.map((r) => r.content).join(",")} (${want.ttl})`);
+    }
+  }
+  for (const [key, have] of present) {
+    if (!wanted.has(key)) {
+      changes.push({ name: have.name, type: have.type, changetype: "DELETE", records: [] });
+      changed.push(`${key} ${have.records.map((r) => r.content).join(",")} → —`);
+    }
+  }
+  if (!dryRun && changes.length > 0) {
+    await pdns.patchRRsets(zone, changes);
+    await pdns.notifyZone(zone);
+    console.log(`[dns] ${pdns.fqdn(zone)}: ${changed.length} RRset(s) changed${created ? " (zone created)" : ""}`);
+    changed.forEach((c) => console.log(`[dns]   ${c}`));
+  }
+  return { zone, created, changed, skipped };
+}
+
+/**
+ * Bring the apex zone on the primary in line with the zone file and the backend's
+ * records. Serialized with the other writes. A file that does not parse changes nothing.
+ */
+export function syncApex(dryRun = false): Promise<ApexSyncResult> {
+  return serialized(() => runSyncApex(dryRun));
+}
+
+/** Last apex problem logged, so a broken file is reported once, not every pass. */
+let apexReported = "";
+
+async function syncApexLogged(): Promise<void> {
+  let report = "";
+  try {
+    const r = await syncApex();
+    if (r.skipped.length) report = `[dns] ${pdns.fqdn(r.zone)}: zone file records left out:\n${r.skipped.map((l) => `[dns]   ${l}`).join("\n")}`;
+  } catch (e) {
+    report = `[dns] ${pdns.fqdn(getServerDomain())}: apex zone not synced: ${(e as Error).message ?? e}`;
+  }
+  if (report && report !== apexReported) console.error(report);
+  if (!report && apexReported) console.log(`[dns] ${pdns.fqdn(getServerDomain())}: zone file OK again`);
+  apexReported = report;
+}
+
 // --- serials: the primary must stay ahead of the secondaries -----------------
 //
 // A zone the primary recreates (wiped volume, zone dropped and re-added) starts at
@@ -862,6 +1035,7 @@ export function startDnsReconciler(intervalMs = 60_000): void {
       if (users) {
         await syncAllUsers().catch((e) => console.error(`[dns] user zones pass failed: ${e.message ?? e}`));
       }
+      if (isApexZoneEnabled()) await syncApexLogged();
       await catchUpSerials().catch((e) => console.error(`[dns] serial check failed: ${e.message ?? e}`));
     } finally {
       running = false;
@@ -878,6 +1052,7 @@ export function startDnsReconciler(intervalMs = 60_000): void {
     console.log(`[dns] user zones on (${isDnsShadowZones() ? "delegated + shadow for active users" : "delegated users"}): ` +
       `gateway ${getDnsGatewayIps().join(",")}, NS ${getDnsNsHosts().join(",")}`);
   }
+  if (isApexZoneEnabled()) console.log(`[dns] apex zone on: ${getServerDomain()} from ${getDnsStaticZoneFile()}`);
 }
 
 export function stopDnsReconciler(): void {

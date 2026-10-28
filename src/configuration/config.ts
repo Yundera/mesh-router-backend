@@ -219,3 +219,13 @@ export function getDnsNsHosts(): string[] {
 export function isDnsShadowZones(): boolean {
   return process.env.DNS_SHADOW_ZONES === "1";
 }
+
+/**
+ * Returns the path of the static zone file for SERVER_DOMAIN itself (BIND format, from
+ * DNS_STATIC_ZONE_FILE), or undefined when unset. Server config, bind-mounted: mount its
+ * directory, not the file, so an edit that replaces the file reaches the container.
+ * The backend adds the dynamic records of the apex zone on top (DnsZones.ts).
+ */
+export function getDnsStaticZoneFile(): string | undefined {
+  return process.env.DNS_STATIC_ZONE_FILE?.trim() || undefined;
+}
