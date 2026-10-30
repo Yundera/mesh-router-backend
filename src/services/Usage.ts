@@ -6,9 +6,10 @@ import { getUsageRetentionSeconds } from "../configuration/config.js";
  *
  * The unit of record is a distinct (uid, app, day) tuple — one Daily Active User
  * signal per app per user per UTC day. Raw request counts are intentionally NOT
- * tracked: the gateways dedup per (uid, app, day) at the edge, so only the first
- * notification of the day lands here. Because every write below is a SADD, repeated
- * notifications (cold isolate, PoP migration, fallback path) are idempotent.
+ * tracked. The boxes report it themselves (POST /usage/:userid/:sig): each one's
+ * mesh-router-agent reads its Caddy access log and sends the set of apps opened
+ * that day whenever it grows. Because every write below is a SADD, re-sending a
+ * set (agent restart, retry after a failure) is idempotent.
  *
  * Redis keys (all SET, each EXPIRE'd to the rolling retention window):
  *   usage:dau:{app}:{date}   SET<uid>   per-app DAU
@@ -16,7 +17,9 @@ import { getUsageRetentionSeconds } from "../configuration/config.js";
  *   usage:active:{date}      SET<uid>   global DAU across all apps
  *   usage:user:{uid}:{date}  SET<app>   apps a user touched (not surfaced in v1)
  *
- * {date} is the UTC calendar day, stamped here so there is a single authoritative clock.
+ * {date} is the UTC calendar day of the visit. The box names it, so the set it flushes
+ * after midnight still lands on the day it was collected; isReportableDate() keeps a
+ * box from writing anywhere but today and yesterday.
  */
 
 export interface UsageEvent {
@@ -24,14 +27,41 @@ export interface UsageEvent {
   app: string;
 }
 
-/** Maximum events accepted in a single ingest call (abuse guard). */
+/** Maximum apps accepted in a single report (abuse guard). */
 export const MAX_USAGE_EVENTS_PER_REQUEST = 100;
+
+/** An app name as a box reports it: a host label, or `_root` / `_custom`. */
+const APP_NAME = /^[a-z0-9_][a-z0-9-]{0,62}$/;
+
+/**
+ * Whether a reported app name is well-formed. Anything else is dropped by the
+ * caller rather than stored as a Redis key fragment.
+ */
+export function isValidAppName(app: unknown): app is string {
+  return typeof app === "string" && APP_NAME.test(app);
+}
 
 /**
  * Format a Date as a UTC calendar day string (YYYY-MM-DD).
  */
 export function utcDateString(date: Date = new Date()): string {
   return date.toISOString().slice(0, 10);
+}
+
+/**
+ * Whether a box may report usage for `date`: today or yesterday (UTC). Yesterday is
+ * the set a box flushes after midnight; anything older (or in the future) would let a
+ * box rewrite history.
+ *
+ * @param date - Day the box reports for (YYYY-MM-DD)
+ * @param now - Current time (default: now)
+ */
+export function isReportableDate(date: unknown, now: Date = new Date()): date is string {
+  if (typeof date !== "string") {
+    return false;
+  }
+  const yesterday = new Date(now.getTime() - 24 * 60 * 60 * 1000);
+  return date === utcDateString(now) || date === utcDateString(yesterday);
 }
 
 function dauKey(app: string, date: string): string {
@@ -51,17 +81,17 @@ function userKey(uid: string, date: string): string {
 }
 
 /**
- * Record one or more (uid, app) usage events for the current UTC day.
+ * Record one or more (uid, app) usage events for a UTC day.
  * Idempotent: re-recording the same tuple within the day is a no-op on cardinality.
  *
  * @param events - Array of {uid, app} events
+ * @param date - UTC day the events belong to (default: today)
  */
-export async function recordUsage(events: UsageEvent[]): Promise<void> {
+export async function recordUsage(events: UsageEvent[], date: string = utcDateString()): Promise<void> {
   if (!events || events.length === 0) {
     return;
   }
 
-  const date = utcDateString();
   const ttl = getUsageRetentionSeconds();
   const redis = getRedisClient();
   const pipeline = redis.pipeline();

@@ -9,7 +9,7 @@ import {getCACertificate, signCSR, isCAInitialized} from "./CertificateAuthority
 import {logDomainAssigned} from "./DomainLogger.js";
 import {runCleanup} from "./DomainCleanup.js";
 import {probeCandidates, checkRateLimit, PROBE_LIMITS} from "./Probe.js";
-import {recordUsage, UsageEvent, MAX_USAGE_EVENTS_PER_REQUEST} from "./Usage.js";
+import {recordUsage, isReportableDate, isValidAppName, MAX_USAGE_EVENTS_PER_REQUEST} from "./Usage.js";
 import {noteRoutes, onRegistration, isUserZonesEnabled, viewUser, isInScope, resyncUser, setForce, setCaaAccounts, isAcmeAccountUri, MAX_CAA_ACCOUNTS} from "./DnsZones.js";
 import {hopName, acceptsProxyProtocol, setProxyProtocol} from "./HopNames.js";
 import {getDnsHealth, httpStatusFor} from "./DnsHealth.js";
@@ -105,6 +105,8 @@ export function routerAPI(expressApp: express.Application) {
       version: 2,
       minClientVersion: 2,
       serverDomain: process.env.SERVER_DOMAIN || 'unknown',
+      // Optional endpoints a client may probe before calling (usage = POST /usage/:userid/:sig).
+      capabilities: ['usage'],
       ...(ipZone ? { ipZone } : {}),
       ...(gatewayIps.length ? { gatewayIps } : {}),
       ...(tunnelProviders.length ? { tunnelProviders } : {}),
@@ -664,46 +666,60 @@ export function routerAPI(expressApp: express.Application) {
   });
 
   // ============================================================================
-  // Usage (DAU) ingest API
+  // Usage (DAU) reporting API
   // ============================================================================
 
   /**
-   * POST /internal/usage/ingest
-   * Fire-and-forget usage notifications from the gateways (CF Worker / OpenResty).
-   * Records distinct (uid, app, day) tuples for the Daily Active Users KPI.
+   * POST /usage/:userid/:sig
+   * A box reports the apps someone opened on it during one UTC day, for the Daily
+   * Active Users KPI. mesh-router-agent sends the whole day's set each time it grows,
+   * so a report is idempotent (SADD) and may repeat apps already recorded.
    *
-   * Auth: Bearer SERVICE_API_KEY (service-only; uid is in the payload, not the caller).
+   * Auth: Ed25519 signature of the userid, as for route registration. The uid recorded
+   * is the one in the path, never anything from the body.
    *
-   * Body: { "events": [ { "uid": "abc", "app": "nextcloud" } ] }
-   * Responds 204 on success (callers do not read the body).
+   * Body: { "date": "YYYY-MM-DD", "apps": ["nextcloud", "_root"] }
+   *   - date: today or yesterday (UTC); yesterday is the set flushed after midnight
+   *   - apps: at most MAX_USAGE_EVENTS_PER_REQUEST; malformed names are dropped, not rejected
+   * Responds 200 { recorded: n }.
    */
-  router.post('/internal/usage/ingest', authenticateService, async (req, res) => {
+  router.post('/usage/:userid/:sig', async (req, res) => {
+    const { userid, sig } = req.params;
+    const { date, apps } = (req.body || {}) as { date?: unknown; apps?: unknown };
+
     try {
-      const body = req.body as { events?: unknown };
-      if (!body || !Array.isArray(body.events)) {
-        return res.status(400).json({ error: "Body must contain an 'events' array" });
+      if (!Array.isArray(apps)) {
+        return res.status(400).json({ error: "apps array is required in request body." });
+      }
+      if (apps.length > MAX_USAGE_EVENTS_PER_REQUEST) {
+        return res.status(413).json({ error: `Too many apps (max ${MAX_USAGE_EVENTS_PER_REQUEST})` });
+      }
+      if (!isReportableDate(date)) {
+        return res.status(400).json({ error: "date must be today or yesterday (UTC, YYYY-MM-DD)." });
       }
 
-      if (body.events.length > MAX_USAGE_EVENTS_PER_REQUEST) {
-        return res.status(413).json({ error: `Too many events (max ${MAX_USAGE_EVENTS_PER_REQUEST})` });
+      const userData = await getUserDomain(userid);
+      if (!userData) {
+        return res.status(404).json({ error: "User not found. Register a domain first." });
       }
 
-      // Keep only well-formed entries; malformed ones are ignored, not rejected.
-      const events: UsageEvent[] = [];
-      for (const e of body.events) {
-        if (
-          e && typeof e === 'object' &&
-          typeof (e as UsageEvent).uid === 'string' && (e as UsageEvent).uid.length > 0 &&
-          typeof (e as UsageEvent).app === 'string' && (e as UsageEvent).app.length > 0
-        ) {
-          events.push({ uid: (e as UsageEvent).uid, app: (e as UsageEvent).app });
-        }
+      let isValid = false;
+      try {
+        isValid = await verifySignature(userData.publicKey, sig, userid);
+      } catch (e) {
+        console.log('Invalid signature format for usage report', { userid, error: e.message });
+        return res.status(401).json({ error: "Invalid signature." });
+      }
+      if (!isValid) {
+        logAuthFailure(req, 'invalid_signature', { userid, endpoint: 'usage_report' });
+        return res.status(401).json({ error: "Invalid signature." });
       }
 
-      await recordUsage(events);
-      return res.status(204).end();
+      const valid = [...new Set(apps.filter(isValidAppName))];
+      await recordUsage(valid.map((app) => ({ uid: userid, app })), date);
+      return res.status(200).json({ recorded: valid.length });
     } catch (error) {
-      console.error("Error in POST /internal/usage/ingest", error);
+      console.error("Error in POST /usage/:userid/:sig", error);
       return res.status(500).json({ error: error.toString() });
     }
   });

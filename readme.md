@@ -23,6 +23,12 @@ Express.js API for Mesh Router domain management and route resolution. Handles u
 | GET | `/routes/:userid` | Public | Get routes for a user |
 | GET | `/resolve/v2/:domain` | Public | Resolve domain to routes with TTL info |
 
+### Usage (DAU) API
+
+| Method | Endpoint | Auth | Description |
+|--------|----------|------|-------------|
+| POST | `/usage/:userid/:sig` | Ed25519 Signature | A box reports `{date, apps[]}`: the apps someone opened on it that UTC day (today or yesterday). Sent by mesh-router-agent from the box's Caddy access log; opt-out on the box (`MESH_USAGE_REPORT=off`). Read with `mesh-cli usage summary\|app\|top` |
+
 #### Route Types
 
 Routes have a `type` field that determines how they're used:

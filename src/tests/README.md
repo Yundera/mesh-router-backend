@@ -44,6 +44,12 @@ docker compose exec mesh-router-backend pnpm test
 | `GET /routes/:userid` | Retrieve routes, handle missing routes |
 | `GET /resolve/v2/:domain` | Domain resolution, TTL info, case-insensitive lookup |
 
+### Usage API (`usage.spec.ts`)
+
+| Endpoint | Tests |
+|----------|-------|
+| `POST /usage/:userid/:sig` | Signed report recorded + idempotent, yesterday filed under yesterday, older/malformed dates 400, missing apps 400, bad signature 401, unknown user 404, malformed app names dropped, body uid ignored |
+
 ## Test Helpers
 
 ### User Management
