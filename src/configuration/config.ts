@@ -244,15 +244,6 @@ export function getDnsNsHosts(): string[] {
 }
 
 /**
- * True when DNS_SHADOW_ZONES=1: every active user gets a zone on the nameservers, not
- * only delegated ones. Without a delegation no resolver asks for those zones, so they
- * only serve `dig @<ns>` checks of the answer rule.
- */
-export function isDnsShadowZones(): boolean {
-  return process.env.DNS_SHADOW_ZONES === "1";
-}
-
-/**
  * Returns the path of the static zone file for SERVER_DOMAIN itself (BIND format, from
  * DNS_STATIC_ZONE_FILE), or undefined when unset. Server config, bind-mounted: mount its
  * directory, not the file, so an edit that replaces the file reaches the container.

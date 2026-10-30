@@ -12,12 +12,10 @@ import {
   getDnsStaticZoneFile,
   getPdnsApiUrl,
   getServerDomain,
-  isDnsShadowZones,
 } from "../configuration/config.js";
 import { DnsForce, NSL_ROUTER_COLLECTION, NSLRouterData, NSLRouterDns } from "../DataBaseDTO/DataBaseNSLRouter.js";
 import { isLanOrReserved } from "./Probe.js";
-import { Route, getRoutes, getActiveUserIds } from "./Routes.js";
-import { getAllUserDomains } from "./Domain.js";
+import { Route, getRoutes } from "./Routes.js";
 import { DnsProbeState, getProbeState, probeBox, probeDue, saveProbeState } from "./DnsProbe.js";
 import { getAcmeTxt } from "./AcmeDns.js";
 import { boxGatewayIps, healthyGatewayIps, startGatewayHealth, stopGatewayHealth } from "./GatewayHealth.js";
@@ -34,11 +32,13 @@ import { parseZoneFile, ZoneFileError, ZoneRecord } from "./ZoneFile.js";
  *   answers an IP only if allow.<ip-zone>.invalid holds <key> A|AAAA <ip> — key = dashed
  *   IPv4 or 32-digit expanded IPv6. Kept equal to the public IPs agents registered
  *   within the grace period.
- * - per-user zones <label>.<SERVER_DOMAIN>: box IP or gateway per the answer rule, for
- *   delegated users (and every active user in shadow mode, DNS_SHADOW_ZONES=1).
+ * - per-user zones <label>.<SERVER_DOMAIN>, one per box that registered routes. Dormant
+ *   (fixed gateway answer, written once) until the parent zone delegates the name to our
+ *   nameservers; then live (`dns.live`): box IP or gateway per the answer rule, probes,
+ *   DNS-01 TXT, CAA. Nothing is set by hand: the NS record in the parent decides.
  * - the apex zone <SERVER_DOMAIN> itself, when DNS_STATIC_ZONE_FILE is set: the static
  *   file plus what the backend derives (apex NS, the * wildcard to the gateways, the
- *   ip.<zone> and delegated users' NS).
+ *   ip.<zone> and every user zone's NS).
  */
 
 /** Redis sorted set: IP → last time an agent registered it (ms). */
@@ -455,11 +455,42 @@ export interface UserSyncResult {
   answer: DnsAnswer;
 }
 
+/** A live user's zone: the answer rule, challenge TXT and CAA. */
 async function runSyncUser(user: ScopeUser, dryRun: boolean): Promise<UserSyncResult> {
   const view = await viewUser(user);
-  const zone = view.zone;
-  const desired = desiredUserRRsets(zone, view.answer, getDnsNsHosts(), view.acmeTxt, view.caaAccounts);
+  const desired = desiredUserRRsets(view.zone, view.answer, getDnsNsHosts(), view.acmeTxt, view.caaAccounts);
+  const { created, changed } = await applyUserZone(view.zone, desired, dryRun);
+  if (!dryRun && changed.length > 0) {
+    // the shadow log: one line per answer change of the user's own name
+    const apex = changed.find((c) => c.startsWith(`${pdns.fqdn(view.zone)} A `));
+    if (apex) console.log(`[dns] ${user.label}: ${apex} ${view.answer.kind} (${view.answer.reason})`);
+  }
+  return { zone: view.zone, created, changed, answer: view.answer };
+}
 
+/** The answer of a dormant zone: the configured gateways, nothing per box. */
+function dormantAnswer(): DnsAnswer {
+  return { kind: "gateway", ips: getDnsGatewayIps(), reason: "dormant: not delegated to our nameservers", hosts: {} };
+}
+
+/**
+ * A dormant zone (the parent does not delegate it to us): NS and the gateways, no probe,
+ * no TXT, no CAA. Nobody asks it until the NS record appears, and then the gateway is a
+ * working answer until the backend sees the delegation.
+ */
+async function runWriteDormant(label: string, dryRun: boolean): Promise<UserSyncResult> {
+  const zone = userZoneName(label);
+  const ans = dormantAnswer();
+  const { created, changed } = await applyUserZone(zone, desiredUserRRsets(zone, ans, getDnsNsHosts()), dryRun);
+  if (!dryRun && created) console.log(`[dns] ${label}: dormant zone ${zone} created`);
+  if (!dryRun) await getRedisClient().setex(zoneMarkKey(label), ZONE_MARK_TTL_SECONDS, "1").catch(() => undefined);
+  return { zone, created, changed, answer: ans };
+}
+
+/** Bring a user zone's managed RRsets in line with `desired`, creating the zone if missing. */
+async function applyUserZone(
+  zone: string, desired: pdns.PdnsRRset[], dryRun: boolean
+): Promise<{ created: boolean; changed: string[] }> {
   let current = await pdns.getZone(zone);
   let created = false;
   if (!current && !dryRun) {
@@ -502,26 +533,52 @@ async function runSyncUser(user: ScopeUser, dryRun: boolean): Promise<UserSyncRe
   if (!dryRun && changes.length > 0) {
     await pdns.patchRRsets(zone, changes);
     await pdns.notifyZone(zone);
-    // the shadow log: one line per answer change of the user's own name
-    const apexKey = `${pdns.fqdn(zone)} A`;
-    const before = present.get(apexKey)?.records.map((r) => r.content).sort().join(",") || "—";
-    const after = view.answer.ips.join(",");
-    if (before !== after) {
-      console.log(`[dns] ${user.label}: ${before} → ${view.answer.kind} ${after} (${view.answer.reason})`);
-    }
   }
-  return { zone, created, changed, answer: view.answer };
+  return { created, changed };
 }
 
-/** Bring one user's zone on the primary in line with its answer. Serialized. */
+/** Bring one live user's zone on the primary in line with its answer. Serialized. */
 export function syncUser(user: ScopeUser, dryRun = false): Promise<UserSyncResult> {
   return serialized(() => runSyncUser(user, dryRun));
 }
 
-/** Delete a user's zone from the primary (no longer in scope). */
+/** Write (or create) the dormant zone of a user that is not live. Serialized. */
+export function writeDormant(label: string, dryRun = false): Promise<UserSyncResult> {
+  return serialized(() => runWriteDormant(label, dryRun));
+}
+
+/**
+ * Redis marker: the user's zone exists on the primary (saves a primary GET per
+ * registration). It expires, so a wiped primary gets its dormant zones back within a day.
+ */
+const ZONE_MARK_TTL_SECONDS = 24 * 60 * 60;
+
+function zoneMarkKey(label: string): string {
+  return `dns:zone:${label.toLowerCase()}`;
+}
+
+/**
+ * Make sure the user has a zone: a dormant one when it has none. An existing zone is left
+ * as it is (it may be live). Cheap on the hot path: one Redis GET once the marker is set.
+ */
+export async function ensureUserZone(label: string): Promise<boolean> {
+  const redis = getRedisClient();
+  if (await redis.get(zoneMarkKey(label))) return false;
+  return serialized(async () => {
+    if (await pdns.getZone(userZoneName(label))) {
+      await redis.setex(zoneMarkKey(label), ZONE_MARK_TTL_SECONDS, "1");
+      return false;
+    }
+    return (await runWriteDormant(label, false)).created;
+  });
+}
+
+/** Delete a user's zone from the primary (the domain was released or renamed). */
 export function dropUserZone(label: string): Promise<boolean> {
   return serialized(async () => {
     const zone = userZoneName(label);
+    const redis = getRedisClient();
+    await redis.del(zoneMarkKey(label), liveKey(label), liveMissKey(label)).catch(() => undefined);
     if (!(await pdns.getZone(zone))) return false;
     await pdns.deleteZone(zone);
     // the catalog loses the member: make the secondaries re-transfer it and drop the zone
@@ -562,22 +619,13 @@ async function scopeMark(): Promise<number> {
   }
 }
 
-/** Delegated users, plus every active user (Redis activity) when shadow zones are on. */
+/** Live users: the only ones probed and synced by the full pass. One indexed query. */
 async function loadScope(): Promise<Map<string, ScopeUser>> {
   const out = new Map<string, ScopeUser>();
-  if (isDnsShadowZones()) {
-    const active = new Set(await getActiveUserIds());
-    for (const { userId, data } of await getAllUserDomains()) {
-      if (data.dns?.delegated || active.has(userId)) {
-        out.set(userId, { uid: userId, label: data.domainName, dns: data.dns });
-      }
-    }
-  } else {
-    const snap = await getFirestore().collection(NSL_ROUTER_COLLECTION).where("dns.delegated", "==", true).get();
-    for (const doc of snap.docs) {
-      const data = doc.data() as NSLRouterData;
-      if (data.domainName) out.set(doc.id, { uid: doc.id, label: data.domainName, dns: data.dns });
-    }
+  const snap = await getFirestore().collection(NSL_ROUTER_COLLECTION).where("dns.live", "==", true).get();
+  for (const doc of snap.docs) {
+    const data = doc.data() as NSLRouterData;
+    if (data.domainName) out.set(doc.id, { uid: doc.id, label: data.domainName, dns: data.dns });
   }
   return out;
 }
@@ -592,9 +640,9 @@ async function getScope(force = false): Promise<Map<string, ScopeUser>> {
   return scope;
 }
 
-/** True when this user's names are served by our nameservers. */
+/** True when the user is live: the parent zone delegates its names to our nameservers. */
 export function isInScope(data: NSLRouterData | null | undefined): boolean {
-  return !!data?.domainName && (!!data.dns?.delegated || isDnsShadowZones());
+  return !!data?.domainName && !!data.dns?.live;
 }
 
 /** Update one user's entry in the cached scope (after a CLI change or a registration). */
@@ -605,11 +653,15 @@ function rememberUser(user: ScopeUser | null, uid: string): void {
 }
 
 /**
- * After a route registration (fire and forget): probe if due, then sync the user's
- * zone. `data` is the user doc the registration already read.
+ * After a route registration (fire and forget): make sure the user has a zone (dormant
+ * the first time), check the delegation when due, then probe and sync a live user.
+ * `data` is the user doc the registration already read: no Firestore read here.
  */
 export async function onRegistration(uid: string, data: NSLRouterData | null): Promise<void> {
-  if (!isUserZonesEnabled() || !data || !isInScope(data)) return;
+  if (!isUserZonesEnabled() || !data?.domainName) return;
+  await ensureUserZone(data.domainName);
+  if (await refreshLive(uid, data)) return; // changed: refreshLive synced the zone
+  if (!isInScope(data)) return;
   const user: ScopeUser = { uid, label: data.domainName, dns: data.dns };
   rememberUser(user, uid);
   await probeIfDue(user, PROBE_ON_REGISTRATION_MS);
@@ -623,34 +675,66 @@ const LIVE_RESOLVERS = ["1.1.1.1", "8.8.8.8"];
 /** Kept this long, re-checked every LIVE_REFRESH_SECONDS: a reader never meets a gap. */
 const LIVE_TTL_SECONDS = 60 * 60;
 const LIVE_REFRESH_SECONDS = 10 * 60;
+/** A live user goes back to dormant only after this many "not delegated" answers in a row. */
+export const LIVE_DOWNGRADE_CHECKS = 3;
 
 function liveKey(label: string): string {
   return `dns:live:${label.toLowerCase()}`;
 }
 
+function liveMissKey(label: string): string {
+  return `dns:livemiss:${label.toLowerCase()}`;
+}
+
+/** True when the NS set seen in the parent names at least one of our nameservers. Pure. */
+export function delegatesToUs(nsSet: string[], nsHosts: string[]): boolean {
+  const norm = (h: string) => h.toLowerCase().replace(/\.+$/, "");
+  const ours = new Set(nsHosts.map(norm));
+  return nsSet.some((h) => ours.has(norm(h)));
+}
+
 /**
- * True when a public resolver returns exactly our DNS_NS_HOSTS as the NS set of
- * <label>.<zone>: the delegation is in the parent zone, so a CA validating DNS-01 (and
- * every browser) reaches our nameservers. Until then nothing orders a certificate.
+ * What the public resolvers see as the NS set of <label>.<zone>: the names, [] when the
+ * parent has no NS there, null when there is no conclusive answer (timeout, SERVFAIL…).
  */
-export async function checkLive(label: string): Promise<boolean> {
-  const want = getDnsNsHosts().map((h) => h.toLowerCase().replace(/\.$/, "")).sort().join(",");
-  let live: boolean;
+export async function lookupDelegation(label: string): Promise<string[] | null> {
   try {
     const resolver = new dnsp.Resolver({ timeout: 3000, tries: 2 });
     resolver.setServers(LIVE_RESOLVERS);
-    const got = (await resolver.resolveNs(userZoneName(label))).map((h) => h.toLowerCase().replace(/\.$/, "")).sort().join(",");
-    live = got === want;
+    return await resolver.resolveNs(userZoneName(label));
   } catch (e) {
     const code = (e as NodeJS.ErrnoException).code;
-    if (code !== dnsp.NODATA && code !== dnsp.NOTFOUND) {
-      // timeout, SERVFAIL…: no answer is not "not delegated" — keep the last value
-      // (a box flips its certificates on this flag: mesh-router-caddy's zone file)
-      return isLive(label);
-    }
-    live = false; // no NS at that name in the parent zone
+    return code === dnsp.NODATA || code === dnsp.NOTFOUND ? [] : null;
   }
-  await getRedisClient().setex(liveKey(label), LIVE_TTL_SECONDS, live ? "1" : "0");
+}
+
+/**
+ * Live = a public resolver returns one of our DNS_NS_HOSTS in the NS set of <label>.<zone>:
+ * the parent delegates it to us, so a CA validating DNS-01 (and every browser) reaches our
+ * nameservers. `wasLive` = the stored state. No conclusive answer keeps it; a live user
+ * turns dormant only after LIVE_DOWNGRADE_CHECKS misses in a row (a box flips its
+ * certificates on this flag: mesh-router-caddy's zone file). `lookup` for the tests.
+ */
+export async function checkLive(
+  label: string, wasLive: boolean, lookup: (label: string) => Promise<string[] | null> = lookupDelegation
+): Promise<boolean> {
+  const redis = getRedisClient();
+  const seen = await lookup(label);
+  let live: boolean;
+  if (seen === null) {
+    live = wasLive;
+  } else if (delegatesToUs(seen, getDnsNsHosts())) {
+    live = true;
+    if (wasLive) await redis.del(liveMissKey(label));
+  } else if (wasLive) {
+    const misses = await redis.incr(liveMissKey(label));
+    await redis.expire(liveMissKey(label), LIVE_TTL_SECONDS);
+    live = misses < LIVE_DOWNGRADE_CHECKS;
+    if (!live) await redis.del(liveMissKey(label));
+  } else {
+    live = false;
+  }
+  await redis.setex(liveKey(label), LIVE_TTL_SECONDS, live ? "1" : "0");
   return live;
 }
 
@@ -660,14 +744,49 @@ async function liveDue(label: string): Promise<boolean> {
   return ttl < 0 || ttl <= LIVE_TTL_SECONDS - LIVE_REFRESH_SECONDS;
 }
 
-/** Last live check (refreshed by the full pass); false when unknown. */
-export async function isLive(label: string): Promise<boolean> {
-  return (await getRedisClient().get(liveKey(label))) === "1";
+/** Misses counted towards a downgrade (mesh-cli dns status). */
+export async function liveMisses(label: string): Promise<number> {
+  return Number(await getRedisClient().get(liveMissKey(label))) || 0;
 }
 
-/** Delegated users in the current scope (the gateway certificate issuer's list). */
-export async function delegatedUsers(): Promise<ScopeUser[]> {
-  return [...(await getScope()).values()].filter((u) => u.dns?.delegated);
+/** Labels with a check in flight: a box registers its agent and tunnel routes together. */
+const liveChecking = new Set<string>();
+
+/**
+ * Check the delegation when due (or now with `force`) and store a change: `dns.live` in
+ * Firestore (written on transitions only), the scope, and the zone (live answer or
+ * dormant). True when the state changed.
+ */
+export async function refreshLive(uid: string, data: NSLRouterData, force = false): Promise<boolean> {
+  const label = data.domainName.toLowerCase();
+  if (liveChecking.has(label) || (!force && !(await liveDue(label)))) return false;
+  liveChecking.add(label);
+  try {
+    const wasLive = !!data.dns?.live;
+    const live = await checkLive(label, wasLive);
+    if (live === wasLive) return false;
+    await setLive(uid, data, live);
+    return true;
+  } finally {
+    liveChecking.delete(label);
+  }
+}
+
+async function setLive(uid: string, data: NSLRouterData, live: boolean): Promise<void> {
+  await getFirestore().collection(NSL_ROUTER_COLLECTION).doc(uid).update(
+    live
+      // `delegated` is the flag of the manual flow this replaces: dropped on the way
+      ? { "dns.live": true, "dns.delegated": FieldValue.delete() }
+      : { "dns.live": FieldValue.delete() }
+  );
+  console.log(`[dns] ${data.domainName}: ${live ? "live (delegated to our nameservers)" : "dormant (no delegation any more)"}`);
+  const { live: _was, ...rest } = data.dns ?? {};
+  await resyncUser(uid, { ...data, dns: live ? { ...rest, live: true } : rest });
+}
+
+/** Live users in the current scope. */
+export async function liveUsers(): Promise<ScopeUser[]> {
+  return [...(await getScope()).values()];
 }
 
 // --- the apex zone: <SERVER_DOMAIN> itself (architecture §9, §10.2) -----------
@@ -689,8 +808,8 @@ export interface ApexInput {
   gatewayIps: string[];
   /** DNS_IP_ZONE: delegated when it sits under the zone. */
   ipZone?: string;
-  /** Labels of the delegated users: <label>.<zone> NS our nameservers. */
-  delegated: string[];
+  /** Labels of every user zone on the primary: <label>.<zone> NS our nameservers. */
+  userZones: string[];
 }
 
 /**
@@ -714,7 +833,7 @@ export function desiredApexRRsets(input: ApexInput): { rrsets: pdns.PdnsRRset[];
   }
   const ipZone = input.ipZone ? pdns.fqdn(input.ipZone).toLowerCase() : null;
   if (ipZone && ipZone.endsWith(`.${apex}`)) cuts.push(ipZone);
-  for (const label of [...input.delegated].sort()) cuts.push(pdns.fqdn(userZoneName(label)).toLowerCase());
+  for (const label of [...input.userZones].sort()) cuts.push(pdns.fqdn(userZoneName(label)).toLowerCase());
   dynamic.push(...cuts.map(ns));
 
   const owned = new Set(dynamic.map((r) => `${r.name} ${r.type}`));
@@ -764,7 +883,7 @@ export async function loadApexRRsets(): Promise<{ rrsets: pdns.PdnsRRset[]; skip
   const records = parseZoneFile(await fsp.readFile(file, "utf8"), zone);
   return desiredApexRRsets({
     zone, records, nsHosts: getDnsNsHosts(), gatewayIps: healthyGatewayIps(), ipZone: getDnsIpZone(),
-    delegated: (await delegatedUsers()).map((u) => u.label),
+    userZones: await listUserZoneLabels(),
   });
 }
 
@@ -893,13 +1012,24 @@ export async function catchUpSerial(zone: string, addresses?: string[]): Promise
   return lifted;
 }
 
-/** Every zone on the primary, at most once per SERIAL_CHECK_MS (or now with force). */
+/**
+ * Every zone on the primary but the dormant user zones, at most once per SERIAL_CHECK_MS
+ * (or now with force). A dormant zone is written once, and liftNewZone already starts a
+ * recreated one above the nameservers; it is checked again once live.
+ */
 export async function catchUpSerials(force = false): Promise<string[]> {
   if (!force && Date.now() - serialsCheckedAt < SERIAL_CHECK_MS) return [];
   serialsCheckedAt = Date.now();
   const lifted: string[] = [];
+  const live = new Set(isUserZonesEnabled() ? (await liveUsers()).map((u) => u.label.toLowerCase()) : []);
+  const suffix = `.${pdns.fqdn(getServerDomain())}`.toLowerCase();
+  const catalog = pdns.fqdn(getDnsCatalogZone()).toLowerCase();
   for (const z of await pdns.listZones()) {
     if (z.kind === "Producer") continue; // the catalog's serial is PowerDNS's own
+    const name = z.name.toLowerCase();
+    const label = name.endsWith(suffix) ? name.slice(0, -suffix.length) : "";
+    const userZone = /^[a-z0-9-]+$/.test(label) && z.catalog?.toLowerCase() === catalog;
+    if (userZone && !live.has(label)) continue;
     try {
       if (await catchUpSerial(z.name)) lifted.push(z.name);
     } catch (e) {
@@ -920,27 +1050,40 @@ async function pool<T>(items: T[], limit: number, fn: (item: T) => Promise<void>
 export interface UsersPassResult {
   synced: number;
   probed: number;
-  removed: string[];
+  // live users whose delegation is gone: back to dormant
+  dormant: string[];
   failed: string[];
 }
 
+/** The fields of a user doc that the live check and the zone writes read. */
+function scopeData(user: ScopeUser): NSLRouterData {
+  return { domainName: user.label, dns: user.dns } as NSLRouterData;
+}
+
 /**
- * Full pass over user zones: probe users whose probe is due, sync every zone in scope,
- * and delete our zones whose user left the scope (or changed domain).
+ * Full pass over the live users: re-check the delegation when due (a user whose
+ * delegation is gone turns dormant), probe when due, sync the zone. Dormant zones are not
+ * touched: they change only on a registration, a release or a config change.
  */
 export async function syncAllUsers(options: { refreshScope?: boolean } = {}): Promise<UsersPassResult> {
   const users = [...(await getScope(options.refreshScope)).values()];
-  const result: UsersPassResult = { synced: 0, probed: 0, removed: [], failed: [] };
+  const result: UsersPassResult = { synced: 0, probed: 0, dormant: [], failed: [] };
+  const left = new Set<string>();
 
   await pool(users, PROBE_CONCURRENCY, async (user) => {
     try {
-      if (user.dns?.delegated && (await liveDue(user.label))) await checkLive(user.label);
+      if (await refreshLive(user.uid, scopeData(user))) {
+        left.add(user.uid);
+        result.dormant.push(user.label);
+        return;
+      }
       if (await probeIfDue(user, PROBE_INTERVAL_MS)) result.probed++;
     } catch (e) {
       console.error(`[dns] ${user.label}: probe failed: ${(e as Error).message ?? e}`);
     }
   });
   for (const user of users) {
+    if (left.has(user.uid)) continue;
     try {
       await syncUser(user);
       result.synced++;
@@ -949,21 +1092,53 @@ export async function syncAllUsers(options: { refreshScope?: boolean } = {}): Pr
       console.error(`[dns] ${user.label}: zone sync failed: ${(e as Error).message ?? e}`);
     }
   }
-
-  // Our user zones = catalog members named <label>.<SERVER_DOMAIN>.
-  const wanted = new Set(users.map((u) => pdns.fqdn(userZoneName(u.label))));
-  const suffix = `.${pdns.fqdn(getServerDomain())}`;
-  const catalog = pdns.fqdn(getDnsCatalogZone());
-  for (const z of await pdns.listZones()) {
-    const name = z.name.toLowerCase();
-    const label = name.slice(0, -suffix.length);
-    const ours = name.endsWith(suffix) && /^[a-z0-9-]+$/.test(label) && z.catalog?.toLowerCase() === catalog;
-    if (ours && !wanted.has(name) && await dropUserZone(label)) result.removed.push(label);
-  }
   return result;
 }
 
-/** Re-read one user from Firestore and sync (or drop) its zone: used after a CLI change. */
+/** Labels of our user zones on the primary: catalog members named <label>.<SERVER_DOMAIN>. */
+export async function listUserZoneLabels(): Promise<string[]> {
+  const suffix = `.${pdns.fqdn(getServerDomain())}`.toLowerCase();
+  const catalog = pdns.fqdn(getDnsCatalogZone()).toLowerCase();
+  const labels: string[] = [];
+  for (const z of await pdns.listZones()) {
+    const name = z.name.toLowerCase();
+    const label = name.slice(0, -suffix.length);
+    if (name.endsWith(suffix) && /^[a-z0-9-]+$/.test(label) && z.catalog?.toLowerCase() === catalog) labels.push(label);
+  }
+  return labels;
+}
+
+/** Redis: what the dormant zones were last written with (NS hosts + gateways). */
+const DORMANT_CONFIG_KEY = "dns:dormant:config";
+
+function dormantConfig(): string {
+  return `ns=${[...getDnsNsHosts()].sort().join(",")} gw=${[...getDnsGatewayIps()].sort().join(",")}`;
+}
+
+/**
+ * When DNS_NS_HOSTS or DNS_GATEWAY_IPS changed since the dormant zones were written,
+ * rewrite every one of them once (live zones follow in the full pass). Returns how many
+ * were rewritten.
+ */
+export async function refreshDormantZones(force = false): Promise<number> {
+  const redis = getRedisClient();
+  const config = dormantConfig();
+  if (!force && (await redis.get(DORMANT_CONFIG_KEY)) === config) return 0;
+  const live = new Set([...(await getScope(true)).values()].map((u) => u.label.toLowerCase()));
+  let rewritten = 0;
+  for (const label of await listUserZoneLabels()) {
+    if (live.has(label)) continue;
+    if ((await writeDormant(label)).changed.length) rewritten++;
+  }
+  await redis.set(DORMANT_CONFIG_KEY, config);
+  if (rewritten) console.log(`[dns] ${rewritten} dormant zone(s) rewritten for ${config}`);
+  return rewritten;
+}
+
+/**
+ * Sync one user's zone after a change to its settings (CLI, owner API, live check): the
+ * live answer when in scope, else the dormant zone.
+ */
 export async function resyncUser(uid: string, data: NSLRouterData | null): Promise<UserSyncResult | null> {
   if (data && isInScope(data)) {
     const user: ScopeUser = { uid, label: data.domainName, dns: data.dns };
@@ -973,8 +1148,7 @@ export async function resyncUser(uid: string, data: NSLRouterData | null): Promi
   }
   rememberUser(null, uid);
   await markScopeChanged();
-  if (data?.domainName) await dropUserZone(data.domainName);
-  return null;
+  return data?.domainName ? writeDormant(data.domainName) : null;
 }
 
 /**
@@ -1031,6 +1205,7 @@ export function startDnsReconciler(intervalMs = 60_000): void {
   if ((!allow && !users) || fullPassTimer) return;
   let running = false;
   let again = false; // a gateway changed during a pass: run once more right after
+  let dormantChecked = false; // once per start: rewrite dormant zones if the config changed
   const pass = async (gatewayChange = false): Promise<void> => {
     if (running) {
       if (gatewayChange) again = true;
@@ -1043,6 +1218,10 @@ export function startDnsReconciler(intervalMs = 60_000): void {
         await syncAllow().catch((e) => console.error(`[dns] allowlist sync failed: ${e.message ?? e}`));
       }
       if (users) {
+        if (!dormantChecked) {
+          await refreshDormantZones().then(() => { dormantChecked = true; })
+            .catch((e) => console.error(`[dns] dormant zones refresh failed: ${e.message ?? e}`));
+        }
         await syncAllUsers().catch((e) => console.error(`[dns] user zones pass failed: ${e.message ?? e}`));
       }
       if (isApexZoneEnabled()) await syncApexLogged();
@@ -1059,7 +1238,7 @@ export function startDnsReconciler(intervalMs = 60_000): void {
     console.log(`[dns] allowlist on: ${allowZoneName()} every ${intervalMs / 1000}s, grace ${getDnsAllowGraceSeconds()}s`);
   }
   if (users) {
-    console.log(`[dns] user zones on (${isDnsShadowZones() ? "delegated + shadow for active users" : "delegated users"}): ` +
+    console.log(`[dns] user zones on (dormant per box, live once delegated): ` +
       `gateway ${getDnsGatewayIps().join(",")}, NS ${getDnsNsHosts().join(",")}`);
   }
   if (isApexZoneEnabled()) console.log(`[dns] apex zone on: ${getServerDomain()} from ${getDnsStaticZoneFile()}`);

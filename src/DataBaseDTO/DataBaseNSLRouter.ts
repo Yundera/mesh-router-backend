@@ -4,12 +4,12 @@ export const NSL_ROUTER_COLLECTION = "nsl-router";
 export type DnsForce = "auto" | "gateway" | "direct";
 
 /**
- * Nameserver settings for a user, written only by `mesh-cli dns` (DnsZones.ts reads them).
- * Absent = not delegated, auto.
+ * Nameserver settings for a user (DnsZones.ts). Absent = dormant, auto.
  */
 export interface NSLRouterDns {
-    // <user>.<zone> is delegated to our nameservers (the NS record itself is added by hand)
-    delegated?: boolean;
+    // written by the backend: the parent zone delegates <user>.<zone> to our nameservers
+    // (seen by public resolvers); absent = dormant (zone served, asked by nobody)
+    live?: boolean;
     // whole user: auto = answer rule, gateway = always the gateway, direct = box IP (admin)
     force?: DnsForce;
     // per host label ("immich" for immich.<user>.<zone>), overrides `force`

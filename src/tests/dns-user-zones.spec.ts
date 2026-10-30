@@ -5,7 +5,10 @@ import { AddressInfo } from "net";
 import forge from "node-forge";
 import { getRedisClient, closeRedisClient } from "../redis/redisClient.js";
 import { registerRoutes, deleteRoutes } from "../services/Routes.js";
-import { answer, catchUpSerial, desiredUserRRsets, dropUserZone, syncUser, userZoneName, ScopeUser } from "../services/DnsZones.js";
+import {
+  answer, catchUpSerial, checkLive, delegatesToUs, desiredUserRRsets, dropUserZone, ensureUserZone,
+  LIVE_DOWNGRADE_CHECKS, syncUser, userZoneName, writeDormant, ScopeUser,
+} from "../services/DnsZones.js";
 import { DnsProbeState, probeBox, saveProbeState } from "../services/DnsProbe.js";
 import * as pdns from "../services/PowerDns.js";
 
@@ -96,6 +99,17 @@ async function serve(cert: string, key: string): Promise<{ port: number; close: 
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   return { port: (server.address() as AddressInfo).port, close: () => server.close() };
 }
+
+describe("DNS delegation check", () => {
+  const ours = ["ns1.test.example.com", "ns2.test.example.com"];
+
+  it("counts one of our nameservers as a delegation, in any case, with or without the dot", () => {
+    expect(delegatesToUs(["NS2.test.example.com."], ours)).to.equal(true);
+    expect(delegatesToUs(["ns1.test.example.com", "ns2.test.example.com"], ours)).to.equal(true);
+    expect(delegatesToUs(["elisa.ns.cloudflare.com"], ours)).to.equal(false);
+    expect(delegatesToUs([], ours)).to.equal(false);
+  });
+});
 
 describe("DNS probe", function () {
   this.timeout(30_000);
@@ -305,6 +319,54 @@ describe("DNS user zones on the PowerDNS primary", function () {
     } finally {
       await fetch(`${base}/${name}`, { method: "DELETE", headers: h });
     }
+  });
+
+  it("creates a dormant zone once, and leaves an existing (live) zone as it is", async () => {
+    expect(await ensureUserZone(user.label)).to.equal(true);
+    expect(await records()).to.deep.equal([
+      `*.${zone()}. A ${GW.join(",")}`,
+      `${zone()}. A ${GW.join(",")}`,
+      `${zone()}. NS ns1.test.example.com.,ns2.test.example.com.`,
+    ]);
+    expect(await ensureUserZone(user.label)).to.equal(false); // the Redis marker
+
+    await registerRoutes(uid, [{ ip: BOX, port: 443, priority: 1, source: "agent" }]);
+    await saveProbeState(uid, probe("trusted"));
+    await syncUser(user);
+    await getRedisClient().del(`dns:zone:${user.label}`); // a flushed Redis: one primary GET
+    expect(await ensureUserZone(user.label)).to.equal(false);
+    expect(await records()).to.include(`${zone()}. A ${BOX}`);
+  });
+
+  it("turns a live zone back to dormant: gateways, no host record, no TXT or CAA", async () => {
+    await registerRoutes(uid, [{ ip: BOX, port: 443, priority: 1, source: "agent" }]);
+    await saveProbeState(uid, probe("trusted"));
+    await syncUser({ ...user, dns: { hostForce: { immich: "gateway" }, caaAccounts: ["https://acme-v02.api.letsencrypt.org/acme/acct/1"] } });
+    const r = await writeDormant(user.label);
+    expect(r.answer.kind).to.equal("gateway");
+    expect(await records()).to.deep.equal([
+      `*.${zone()}. A ${GW.join(",")}`,
+      `${zone()}. A ${GW.join(",")}`,
+      `${zone()}. NS ns1.test.example.com.,ns2.test.example.com.`,
+    ]);
+    expect((await pdns.getZone(zone()))?.rrsets.some((x) => x.type === "CAA")).to.equal(false);
+    expect((await writeDormant(user.label)).changed).to.deep.equal([]);
+  });
+
+  it("goes live on one of our NS, and dormant only after repeated misses", async () => {
+    const seen = (answer: string[] | null) => async () => answer;
+    await getRedisClient().del(`dns:livemiss:${user.label}`);
+    expect(await checkLive(user.label, false, seen([]))).to.equal(false);
+    expect(await checkLive(user.label, false, seen(["ns1.test.example.com"]))).to.equal(true);
+    // no conclusive answer keeps the state either way
+    expect(await checkLive(user.label, true, seen(null))).to.equal(true);
+    expect(await checkLive(user.label, false, seen(null))).to.equal(false);
+    for (let i = 1; i < LIVE_DOWNGRADE_CHECKS; i++) expect(await checkLive(user.label, true, seen([]))).to.equal(true);
+    expect(await checkLive(user.label, true, seen([]))).to.equal(false);
+    // a delegation seen again resets the count
+    expect(await checkLive(user.label, true, seen([]))).to.equal(true);
+    expect(await checkLive(user.label, true, seen(["ns2.test.example.com"]))).to.equal(true);
+    expect(await checkLive(user.label, true, seen([]))).to.equal(true);
   });
 
   it("dry run writes nothing", async () => {

@@ -1,5 +1,6 @@
 import {NSL_ROUTER_COLLECTION, NSLRouterData} from "../DataBaseDTO/DataBaseNSLRouter.js";
 import { getFirestore, FieldValue } from "firebase-admin/firestore";
+import { dropUserZone, isUserZonesEnabled } from "./DnsZones.js";
 
 //https://www.nic.ad.jp/timeline/en/20th/appendix1.html#:~:text=Format%20of%20a%20domain%20name,a%20maximum%20of%20253%20characters.
 
@@ -133,6 +134,7 @@ export async function updateUserDomain(
   // 1. domain creation => domain must be available
   // 2. domain update => domain must be owned by the user (check with uid)
   // note that 1 user = 0-1 domain (no multiple domain per user)
+  let previous: string | undefined; // the name a renaming user had: its zone goes
   if (domainName) {
     const validation = validateDomainName(domainName);
     if (!validation.isValid) {
@@ -151,6 +153,7 @@ export async function updateUserDomain(
     if (!isOwned && isReservedDomain(domainName)) {
       throw new Error("Domain name is not available.");
     }
+    if (isAvailable) previous = (await getUserDomain(userId))?.domainName;
   }
 
   // Clean the data by removing undefined values before sending to Firestore
@@ -165,6 +168,17 @@ export async function updateUserDomain(
 
   const userDocRef = getFirestore().collection(NSL_ROUTER_COLLECTION).doc(userId);
   await userDocRef.set(cleanedData, { merge: true });
+  if (previous && previous.toLowerCase() !== domainName.toLowerCase()) {
+    // the new name is not delegated yet: dormant until the live check says otherwise
+    await userDocRef.update({ "dns.live": FieldValue.delete() });
+    releaseZone(previous);
+  }
+}
+
+/** Drop the zone of a label that is gone (fire and forget: never fails the caller). */
+function releaseZone(label: string | undefined): void {
+  if (!label || !isUserZonesEnabled()) return;
+  dropUserZone(label).catch((e) => console.error(`[dns] ${label}: zone removal failed: ${e.message ?? e}`));
 }
 
 /**
@@ -176,7 +190,9 @@ export async function deleteUserDomain(userId: string): Promise<void> {
     throw new Error("User ID is required.");
   }
 
+  const label = (await getUserDomain(userId))?.domainName;
   await getFirestore().collection(NSL_ROUTER_COLLECTION).doc(userId).delete();
+  releaseZone(label);
 }
 
 /**
@@ -208,11 +224,14 @@ export async function clearDomainAssignment(userId: string): Promise<void> {
     throw new Error("User ID is required.");
   }
 
+  const label = (await getUserDomain(userId))?.domainName;
   const userDocRef = getFirestore().collection(NSL_ROUTER_COLLECTION).doc(userId);
   await userDocRef.update({
     domainName: FieldValue.delete(),
     publicKey: FieldValue.delete(),
+    "dns.live": FieldValue.delete(),
   });
+  releaseZone(label);
 }
 
 /**

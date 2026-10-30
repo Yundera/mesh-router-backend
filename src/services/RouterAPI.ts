@@ -10,7 +10,7 @@ import {logDomainAssigned} from "./DomainLogger.js";
 import {runCleanup} from "./DomainCleanup.js";
 import {probeCandidates, checkRateLimit, PROBE_LIMITS} from "./Probe.js";
 import {recordUsage, UsageEvent, MAX_USAGE_EVENTS_PER_REQUEST} from "./Usage.js";
-import {noteRoutes, onRegistration, isUserZonesEnabled, viewUser, isInScope, isLive, resyncUser, setForce, setCaaAccounts, isAcmeAccountUri, MAX_CAA_ACCOUNTS} from "./DnsZones.js";
+import {noteRoutes, onRegistration, isUserZonesEnabled, viewUser, isInScope, resyncUser, setForce, setCaaAccounts, isAcmeAccountUri, MAX_CAA_ACCOUNTS} from "./DnsZones.js";
 import {hopName, acceptsProxyProtocol, setProxyProtocol} from "./HopNames.js";
 import {getDnsHealth, httpStatusFor} from "./DnsHealth.js";
 import {NSLRouterData} from "../DataBaseDTO/DataBaseNSLRouter.js";
@@ -37,14 +37,15 @@ function logAuthFailure(req: Request, reason: string, context: Record<string, un
 
 /**
  * What our nameservers do for a user (the `dns` block of /resolve/v2 and /domains/active),
- * or undefined when user zones are off. `live` = the parent zone delegates to us.
+ * or undefined when user zones are off. `live` = the parent zone delegates to us;
+ * `delegated` is the same value, kept for the clients that read the older field.
  */
 async function dnsSummary(uid: string, data: NSLRouterData, routes: Route[] | null) {
   if (!isUserZonesEnabled()) return undefined;
   const view = await viewUser({ uid, label: data.domainName, dns: data.dns }, routes);
   return {
-    delegated: !!data.dns?.delegated,
-    live: !!data.dns?.delegated && await isLive(data.domainName),
+    delegated: !!data.dns?.live,
+    live: !!data.dns?.live,
     force: data.dns?.force ?? "auto",
     hostForce: data.dns?.hostForce ?? {},
     answer: view.answer.kind,
@@ -379,7 +380,7 @@ export function routerAPI(expressApp: express.Application) {
 
       // ip.<zone> allowlist: a failing nameserver primary must not fail the registration
       noteRoutes(routesToStore).catch((e) => console.error(`[dns] [${userid}] allowlist update failed: ${e.message ?? e}`));
-      // the user's own zone, when our nameservers serve it (delegated, or shadow mode)
+      // the user's own zone: created dormant the first time, live once delegated
       onRegistration(userid, userData).catch((e) => console.error(`[dns] [${userid}] zone update failed: ${e.message ?? e}`));
 
       return res.status(200).json({
@@ -987,7 +988,7 @@ export function routerAPI(expressApp: express.Application) {
    * POST /acme-dns/present, /acme-dns/cleanup
    * lego's httpreq protocol for the gateway (Traefik): {fqdn, value} with
    * Authorization: Bearer SERVICE_API_KEY. Only _acme-challenge.<label>.<zone>. of a
-   * delegated user: the gateway needs certs only for names our nameservers really serve.
+   * live user: the gateway needs certs only for names our nameservers really serve.
    */
   const httpreq = (action: 'present' | 'cleanup') => async (req: Request, res: express.Response) => {
     const { fqdn, value } = req.body ?? {};
@@ -1000,7 +1001,7 @@ export function routerAPI(expressApp: express.Application) {
         return res.status(400).json({ error: "value must be a 43-character DNS-01 challenge value." });
       }
       const found = await getDomain(label);
-      if (!found || !found.domain.dns?.delegated || !isUserZonesEnabled()) {
+      if (!found || !isInScope(found.domain) || !isUserZonesEnabled()) {
         return res.status(403).json({ error: `${label} is not delegated to our nameservers.` });
       }
       if (action === 'present') await addAcmeTxt(label, value);

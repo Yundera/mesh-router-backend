@@ -1,6 +1,6 @@
 import { promises as dnsp } from "dns";
-import { getDnsCatalogZone, getDnsIpZone, getDnsNsHosts } from "../configuration/config.js";
-import { isDnsEnabled, isUserZonesEnabled } from "./DnsZones.js";
+import { getDnsCatalogZone, getDnsIpZone, getDnsNsHosts, getServerDomain } from "../configuration/config.js";
+import { isDnsEnabled, isUserZonesEnabled, liveUsers } from "./DnsZones.js";
 import * as pdns from "./PowerDns.js";
 import { GatewayState, gatewayStates } from "./GatewayHealth.js";
 
@@ -24,9 +24,10 @@ import { GatewayState, gatewayStates } from "./GatewayHealth.js";
  *   down      no nameserver answers ip.<zone> → 503
  *   off       no nameserver configured       → 200
  *
- * Public: user zones are counted, never named (the list of delegated users is not
- * published here). Computed at most every CACHE_MS, so the route costs no DNS traffic
- * beyond that whatever the request rate.
+ * Dormant user zones (one per box, asked by nobody) are counted, not sampled: the check
+ * stays the same size whatever the fleet. Public: user zones are counted, never named
+ * (the list of live users is not published here). Computed at most every CACHE_MS, so
+ * the route costs no DNS traffic beyond that whatever the request rate.
  */
 
 export type DnsHealthStatus = "ok" | "degraded" | "down" | "off";
@@ -48,7 +49,7 @@ export interface NameserverHealth {
 export interface DnsHealth {
   status: DnsHealthStatus;
   checkedAt: string;
-  primary: { reachable: boolean; zones: number };
+  primary: { reachable: boolean; zones: number; dormantUserZones?: number };
   nameservers: NameserverHealth[];
   gateways: { ip: string; up: boolean; lastError?: string; changedAt?: string; tunnel?: { up: boolean; lastError?: string; changedAt?: string } }[];
   problems: string[];
@@ -182,15 +183,22 @@ async function check(): Promise<DnsHealth> {
   const primaryConfigured = isDnsEnabled() || isUserZonesEnabled();
   let primaryReachable = false;
   let expected: { zone: string; user: boolean; serial: number }[] = [];
+  let dormant = 0;
   if (primaryConfigured) {
     try {
-      expected = (await pdns.listZones())
+      const members = (await pdns.listZones())
         .filter((z) => z.name.toLowerCase() === catalog || z.catalog?.toLowerCase() === catalog)
         .map((z) => ({
           zone: z.name.toLowerCase(),
           user: z.name.toLowerCase() !== catalog && !z.name.toLowerCase().endsWith(".invalid."),
           serial: z.serial,
         }));
+      const live = new Set(isUserZonesEnabled() ? (await liveUsers()).map((u) => u.label.toLowerCase()) : []);
+      const suffix = `.${pdns.fqdn(getServerDomain())}`.toLowerCase();
+      const isDormant = (zone: string) => zone.endsWith(suffix) && /^[a-z0-9-]+$/.test(zone.slice(0, -suffix.length))
+        && !live.has(zone.slice(0, -suffix.length));
+      expected = members.filter((z) => !(z.user && isDormant(z.zone)));
+      dormant = members.length - expected.length;
       primaryReachable = true;
     } catch (e) {
       console.error(`[dns-health] primary: ${(e as Error).message ?? e}`);
@@ -224,6 +232,7 @@ async function check(): Promise<DnsHealth> {
     }
   }
   const health = evaluate(servers, primaryReachable || !primaryConfigured, expected.length, Date.now(), gatewayStates());
+  if (dormant) health.primary.dormantUserZones = dormant;
   if (health.problems.length) console.warn(`[dns-health] ${health.status}: ${health.problems.join("; ")}`);
   return health;
 }

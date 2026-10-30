@@ -81,7 +81,7 @@ describe("apex zone", () => {
     nsHosts: ["nss2.test.example.com", "nss1.test.example.com"],
     gatewayIps: ["151.115.96.14", "51.15.79.231"],
     ipZone: "ip.test.example.com",
-    delegated: ["wisera"],
+    userZones: ["wisera"],
   };
 
   it("adds apex NS, the gateway wildcard and the delegations to the file's records", () => {
@@ -125,7 +125,7 @@ describe("apex zone", () => {
   });
 
   it("skips the ip.<zone> delegation when the ip zone is elsewhere, and the wildcard without gateways", () => {
-    const { rrsets } = desiredApexRRsets({ ...base, records: [], ipZone: "ip.other.org", gatewayIps: [], delegated: [] });
+    const { rrsets } = desiredApexRRsets({ ...base, records: [], ipZone: "ip.other.org", gatewayIps: [], userZones: [] });
     expect(rrsets.map((r) => `${r.name} ${r.type}`)).to.deep.equal(["test.example.com. NS"]);
   });
 });

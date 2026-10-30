@@ -75,7 +75,7 @@ describe("acme-dns API on the PowerDNS primary", function () {
   });
 
   beforeEach(async () => {
-    await ref(uid).update({ dns: { delegated: true } });
+    await ref(uid).update({ dns: { live: true } });
     await getRedisClient().del(`acme:txt:${uid}`, `acme:rate:${uid}`);
     await dropUserZone(uid);
   });
@@ -147,14 +147,14 @@ describe("acme-dns API on the PowerDNS primary", function () {
       expect((await call("present", { fqdn: fqdn(), value: txt("g") }, basic(SERVICE_KEY))).status).to.equal(200);
     });
 
-    it("presents then cleans up a delegated user's challenge", async () => {
+    it("presents then cleans up a live user's challenge", async () => {
       expect((await call("present", { fqdn: fqdn(), value: txt("g") })).status).to.equal(200);
       expect(await zoneTxt(uid)).to.deep.equal([`"${txt("g")}"`]);
       expect((await call("cleanup", { fqdn: fqdn(), value: txt("g") })).status).to.equal(200);
       expect(await zoneTxt(uid)).to.deep.equal([]);
     });
 
-    it("refuses other names and non-delegated users", async () => {
+    it("refuses other names and users that are not live", async () => {
       expect((await call("present", { fqdn: `_acme-challenge.x.${fqdn()}`, value: txt("g") })).status).to.equal(400);
       expect((await call("present", { fqdn: `_acme-challenge.${userZoneName(other.uid)}.`, value: txt("g") })).status).to.equal(403);
     });
@@ -173,7 +173,7 @@ describe("acme-dns API on the PowerDNS primary", function () {
       expect((await ref(uid).get()).data()?.dns?.force).to.equal("gateway");
       await put({ force: "auto" });
       await put({ force: "auto", host: "immich" });
-      expect((await ref(uid).get()).data()?.dns).to.deep.equal({ delegated: true });
+      expect((await ref(uid).get()).data()?.dns).to.deep.equal({ live: true });
     });
 
     it("refuses direct and other users", async () => {
@@ -194,10 +194,10 @@ describe("acme-dns API on the PowerDNS primary", function () {
   });
 
   describe("the dns block", () => {
-    it("reports delegation, live and force in /resolve/v2", async () => {
+    it("reports live (and its delegated alias) and force in /resolve/v2", async () => {
       await ref(uid).update({ "dns.hostForce": { immich: "gateway" } });
       const res = await request(app).get(`/resolve/v2/${uid}`);
-      expect(res.body.dns).to.include({ delegated: true, live: false, force: "auto", answer: "gateway" });
+      expect(res.body.dns).to.include({ delegated: true, live: true, force: "auto", answer: "gateway" });
       expect(res.body.dns.hostForce).to.deep.equal({ immich: "gateway" });
     });
   });

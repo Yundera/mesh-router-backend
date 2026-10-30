@@ -1,12 +1,12 @@
 /**
  * mesh-cli dns <subcommand>   (flags go after the positional arguments)
  *
- *   dns status <user> [--json] [--ns <ip,…>]   settings, probe, answer, SOA serial per NS
- *   dns delegate <user> on|off                 mark <user>.<zone> delegated to our nameservers
+ *   dns status <user> [--json] [--ns <ip,…>]   zone state, delegation check, probe, answer, SOA per NS
  *   dns force <user> [--host <h>] auto|gateway|direct [--yes]
  *   dns probe <user>                           probe the box now
  *   dns acme <user>                            live DNS-01 challenge values and the update counter
- *   dns sync [<user>] [--dry-run]              reconcile now: one user's zone, or allowlist + every zone
+ *   dns sync [<user>] [--dry-run] [--prune]    reconcile now: one user's zone, or allowlist + live zones;
+ *                                              --prune drops zones whose label no user holds
  *   dns allow [--json]                         ip.<zone> allowlist: IPs, last registration, expiry
  *   dns zone [--dry-run]                       sync the apex zone (DNS_STATIC_ZONE_FILE + backend records)
  *   dns zone diff [--ns <ip,…>]                compare it with what nameservers answer (default: the
@@ -14,15 +14,16 @@
  *
  * Talks to Firestore, Redis and the PowerDNS hidden primary with the backend's own env
  * (REDIS_URL, PDNS_API_URL, PDNS_API_KEY, DNS_IP_ZONE, DNS_GATEWAY_IPS, DNS_NS_HOSTS).
- * Delegation of a user zone is an NS record in the parent: written by the backend when the apex
- * zone is ours (DNS_STATIC_ZONE_FILE), added by hand where the parent lives otherwise.
+ * Every box gets a dormant zone on its first registration; it turns live by itself once the
+ * parent zone holds `<user>.<zone> NS <one of DNS_NS_HOSTS>` (a Cloudflare record before the
+ * cutoff, our own apex zone after it). Nothing here switches a user on or off.
  */
 import { promises as dnsp } from "dns";
-import { FieldValue, getFirestore } from "firebase-admin/firestore";
+import { getFirestore } from "firebase-admin/firestore";
 import { ACME_TXT_LIFETIME_MS, acmeRateState, listAcmeTxt } from "../services/AcmeDns.js";
 import { initializeFb } from "../firebase/firebaseIntegration.js";
 import { NSL_ROUTER_COLLECTION, NSLRouterData } from "../DataBaseDTO/DataBaseNSLRouter.js";
-import { getDomain, getUserDomain } from "../services/Domain.js";
+import { getAllUserDomains, getDomain } from "../services/Domain.js";
 import {
   allowZoneName,
   isApexZoneEnabled,
@@ -30,9 +31,15 @@ import {
   isInScope,
   isUserZonesEnabled,
   listAllowed,
+  listUserZoneLabels,
+  liveMisses,
+  LIVE_DOWNGRADE_CHECKS,
   loadApexRRsets,
+  lookupDelegation,
+  delegatesToUs,
+  dropUserZone,
   probeUser,
-  resyncUser,
+  refreshLive,
   ScopeUser,
   setForce,
   syncAllow,
@@ -41,19 +48,19 @@ import {
   syncUser,
   userZoneName,
   viewUser,
+  writeDormant,
 } from "../services/DnsZones.js";
 import { getZone, PdnsRRset } from "../services/PowerDns.js";
-import { getDnsAllowGraceSeconds, getDnsNsHosts, getDnsStaticZoneFile, getServerDomain, isDnsShadowZones } from "../configuration/config.js";
+import { getDnsAllowGraceSeconds, getDnsNsHosts, getDnsStaticZoneFile, getServerDomain } from "../configuration/config.js";
 import { flagValue, hasFlag, MISSING, positionals, renderTable } from "../cli/format.js";
 
 const USAGE = [
   "Usage: mesh-cli dns <subcommand>   (flags after the arguments)",
   "  status <user> [--json] [--ns <ip,…>]",
-  "  delegate <user> on|off",
   "  force <user> [--host <name>] auto|gateway|direct [--yes]",
   "  probe <user>",
   "  acme <user>",
-  "  sync [<user>] [--dry-run]",
+  "  sync [<user>] [--dry-run] [--prune]",
   "  allow [--json]",
   "  zone [--dry-run]",
   "  zone diff [--ns <ip,…>]",
@@ -96,7 +103,11 @@ async function status(label: string | undefined, argv: string[]): Promise<void> 
   const user: ScopeUser = { uid, label: data.domainName, dns: data.dns };
   const view = await viewUser(user);
 
-  const primary = await getZone(view.zone);
+  const [primary, seen, misses] = await Promise.all([getZone(view.zone), lookupDelegation(data.domainName), liveMisses(data.domainName)]);
+  const live = isInScope(data);
+  const delegation = seen === null ? "(no conclusive answer from the public resolvers)"
+    : seen.length === 0 ? "none in the parent zone"
+    : `${seen.join(", ")}${delegatesToUs(seen, getDnsNsHosts()) ? "" : "   (not ours)"}`;
   const servers: { name: string; ip: string }[] = [];
   for (const host of getDnsNsHosts()) {
     try {
@@ -110,7 +121,8 @@ async function status(label: string | undefined, argv: string[]): Promise<void> 
 
   if (hasFlag(argv, "json")) {
     console.log(JSON.stringify({
-      user: data.domainName, uid, inScope: isInScope(data), settings: data.dns ?? {},
+      user: data.domainName, uid, live, zone: primary ? (live ? "live" : "dormant") : "missing",
+      delegation: seen, liveMisses: misses, settings: data.dns ?? {},
       ...view, primarySerial: primary?.serial ?? null, nameservers: serials,
     }, null, 2));
     return;
@@ -118,7 +130,9 @@ async function status(label: string | undefined, argv: string[]): Promise<void> 
 
   const a = view.answer;
   console.log(`${view.zone}   (uid ${uid})\n`);
-  console.log(`served by us   ${isInScope(data) ? (data.dns?.delegated ? "yes (delegated)" : "yes (shadow zone, not delegated)") : "no"}`);
+  console.log(`zone           ${!primary ? "missing (created on the box's next route registration)" : live ? "live" : "dormant (gateway answer, nobody asks it)"}`);
+  console.log(`delegation     ${delegation}${live && misses ? `   ${misses}/${LIVE_DOWNGRADE_CHECKS} misses before dormant` : ""}`);
+  if (!live) console.log(`               to go live, the parent zone needs: ${getDnsNsHosts().map((h) => `${view.zone}. NS ${h}.`).join("  ")} (one is enough)`);
   console.log(`force          ${data.dns?.force ?? "auto"}${Object.keys(data.dns?.hostForce ?? {}).length ? `   hosts: ${Object.entries(data.dns?.hostForce ?? {}).map(([h, f]) => `${h}=${f}`).join(" ")}` : ""}`);
   console.log(`public IP      ${view.publicIp ?? MISSING}`);
   const p = view.probe;
@@ -126,7 +140,7 @@ async function status(label: string | undefined, argv: string[]): Promise<void> 
   if (p) console.log(`               ${p.reason}`);
   if (view.acmeTxt.length) console.log(`acme TXT       ${view.acmeTxt.join(" ")}`);
   console.log(`CAA accounts   ${view.caaAccounts.length ? view.caaAccounts.join(" ") : `${MISSING} (any CA may issue)`}`);
-  console.log(`answer         ${a.kind} ${a.ips.join(",")}   (${a.reason})`);
+  console.log(`answer         ${live ? "" : "once live: "}${a.kind} ${a.ips.join(",")}   (${a.reason})`);
   for (const [host, h] of Object.entries(a.hosts)) {
     console.log(`               ${host}.${view.zone}: ${h.kind} ${h.ips.join(",")}   (${h.reason})`);
   }
@@ -135,28 +149,6 @@ async function status(label: string | undefined, argv: string[]): Promise<void> 
     ["server", "address", "SOA serial"],
     [["primary", "—", primary ? String(primary.serial) : "(no zone)"], ...serials.map((s) => [s.name, s.ip || MISSING, s.serial])]
   );
-}
-
-async function delegate(label: string | undefined, onOff: string | undefined): Promise<void> {
-  requireUserZones();
-  if (onOff !== "on" && onOff !== "off") throw new Error(`usage: mesh-cli dns delegate <user> on|off`);
-  const { uid } = await findUser(label);
-  await getFirestore().collection(NSL_ROUTER_COLLECTION).doc(uid).update(
-    onOff === "on" ? { "dns.delegated": true } : { "dns.delegated": FieldValue.delete() }
-  );
-  const data = await reload(uid);
-  await resyncUser(uid, data);
-  const zone = userZoneName(data.domainName);
-  const ns = getDnsNsHosts().map((h) => `${zone}. NS ${h}.`);
-  if (isApexZoneEnabled()) {
-    console.log(`${zone}: ${onOff === "on" ? "delegated" : "not delegated any more"}; the apex zone's NS records follow on the next pass (dns zone).`);
-  } else if (onOff === "on") {
-    console.log(`${zone}: delegated. Its zone is on our nameservers. To make it live, add in the parent zone:`);
-    ns.forEach((r) => console.log(`  ${r}`));
-  } else {
-    console.log(`${zone}: not delegated any more${isDnsShadowZones() ? " (its shadow zone stays)" : "; zone removed"}. Remove from the parent zone:`);
-    ns.forEach((r) => console.log(`  ${r}`));
-  }
 }
 
 async function force(label: string | undefined, value: string | undefined, argv: string[]): Promise<void> {
@@ -173,11 +165,11 @@ async function force(label: string | undefined, value: string | undefined, argv:
   const { uid } = await findUser(label);
   const { data, result } = await setForce(uid, value, host);
   console.log(`${userZoneName(data.domainName)}${host ? ` host ${host}` : ""}: force ${value}`);
-  if (result) {
+  if (result && isInScope(data)) {
     console.log(`answer ${result.answer.kind} ${result.answer.ips.join(",")} (${result.answer.reason})`);
     result.changed.forEach((c) => console.log(`  ${c}`));
   } else {
-    console.log("(not served by our nameservers: setting stored, no zone written)");
+    console.log("(dormant: setting stored, applies once the zone is live)");
   }
 }
 
@@ -205,12 +197,14 @@ async function sync(target: string | undefined, argv: string[]): Promise<void> {
   if (dryRun) console.log("(dry run: nothing written)");
   if (target) {
     requireUserZones();
-    const { uid, data } = await findUser(target);
-    if (!isInScope(data)) {
-      console.log(`${userZoneName(data.domainName)} is not served by our nameservers (not delegated, no shadow zones)`);
-      return;
-    }
-    const r = await syncUser({ uid, label: data.domainName, dns: data.dns }, dryRun);
+    const { uid, data: found } = await findUser(target);
+    let data = found;
+    // the delegation checked now, not at the next registration (a change is stored)
+    if (!dryRun && await refreshLive(uid, data, true)) data = await reload(uid);
+    const r = isInScope(data)
+      ? await syncUser({ uid, label: data.domainName, dns: data.dns }, dryRun)
+      : await writeDormant(data.domainName, dryRun);
+    console.log(`${r.zone}: ${isInScope(data) ? "live" : "dormant"}, ${r.created ? "created, " : ""}answer ${r.answer.kind} ${r.answer.ips.join(",")} (${r.answer.reason})`);
     console.log(`${r.zone}: ${r.created ? "created, " : ""}answer ${r.answer.kind} ${r.answer.ips.join(",")} (${r.answer.reason})`);
     (r.changed.length ? r.changed : ["no change"]).forEach((c) => console.log(`  ${c}`));
     return;
@@ -226,18 +220,32 @@ async function sync(target: string | undefined, argv: string[]): Promise<void> {
   if (isUserZonesEnabled()) {
     if (dryRun) {
       console.log("user zones: a dry run covers one user at a time (dns sync <user> --dry-run)");
+      if (hasFlag(argv, "prune")) await prune(true);
       return;
     }
     initializeFb();
     const r = await syncAllUsers({ refreshScope: true });
-    console.log(`user zones: ${r.synced} synced, ${r.probed} probed` +
-      `${r.removed.length ? `, removed ${r.removed.join(" ")}` : ""}${r.failed.length ? `, FAILED ${r.failed.join(" ")}` : ""}`);
+    console.log(`live zones: ${r.synced} synced, ${r.probed} probed` +
+      `${r.dormant.length ? `, back to dormant ${r.dormant.join(" ")}` : ""}${r.failed.length ? `, FAILED ${r.failed.join(" ")}` : ""}`);
+    if (hasFlag(argv, "prune")) await prune();
   }
   if (isApexZoneEnabled()) {
     const r = await syncApex();
     console.log(`apex zone ${r.zone}: ${r.changed.length ? `${r.changed.length} RRset(s) changed` : "no change"}` +
       `${r.skipped.length ? `, ${r.skipped.length} file record(s) left out (dns zone)` : ""}`);
   }
+}
+
+/**
+ * Drop the user zones whose label no user holds any more (a release the backend missed).
+ * Reads every user doc: the one place that does, so it runs only when asked.
+ */
+async function prune(dryRun = false): Promise<void> {
+  initializeFb();
+  const held = new Set((await getAllUserDomains()).map((u) => u.data.domainName?.toLowerCase()).filter(Boolean));
+  const orphans = (await listUserZoneLabels()).filter((label) => !held.has(label));
+  for (const label of orphans) if (!dryRun) await dropUserZone(label);
+  console.log(`prune: ${orphans.length ? `${dryRun ? "would drop" : "dropped"} ${orphans.join(" ")}` : "no orphan zone"}`);
 }
 
 async function allow(argv: string[]): Promise<void> {
@@ -351,7 +359,6 @@ export async function main(argv: string[]): Promise<void> {
   const [sub, arg1, arg2] = positionals(argv);
   switch (sub) {
     case "status": return status(arg1, argv);
-    case "delegate": return delegate(arg1, arg2);
     case "force": return force(arg1, arg2, argv);
     case "probe": return probe(arg1);
     case "acme": return acme(arg1);
