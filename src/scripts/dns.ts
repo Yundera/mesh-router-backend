@@ -132,7 +132,8 @@ async function status(label: string | undefined, argv: string[]): Promise<void> 
   console.log(`${view.zone}   (uid ${uid})\n`);
   console.log(`zone           ${!primary ? "missing (created on the box's next route registration)" : live ? "live" : "dormant (gateway answer, nobody asks it)"}`);
   console.log(`delegation     ${delegation}${live && misses ? `   ${misses}/${LIVE_DOWNGRADE_CHECKS} misses before dormant` : ""}`);
-  if (!live) console.log(`               to go live, the parent zone needs: ${getDnsNsHosts().map((h) => `${view.zone}. NS ${h}.`).join("  ")} (one is enough)`);
+  if (!live && seen && delegatesToUs(seen, getDnsNsHosts())) console.log(`               delegated to us: goes live at the box's next route registration (checked at most every 10 min)`);
+  else if (!live) console.log(`               to go live, the parent zone needs: ${getDnsNsHosts().map((h) => `${view.zone}. NS ${h}.`).join("  ")} (one is enough)`);
   console.log(`force          ${data.dns?.force ?? "auto"}${Object.keys(data.dns?.hostForce ?? {}).length ? `   hosts: ${Object.entries(data.dns?.hostForce ?? {}).map(([h, f]) => `${h}=${f}`).join(" ")}` : ""}`);
   console.log(`public IP      ${view.publicIp ?? MISSING}`);
   const p = view.probe;

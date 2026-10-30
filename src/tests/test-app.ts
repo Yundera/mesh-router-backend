@@ -23,7 +23,9 @@ export function createTestApp(): express.Application {
   app.use(express.json());
   app.use(cors());
 
-  routerAPI(app);
+  // The test routes point at unreachable IPs: accept them without the live probe
+  // (RouteValidator has its own tests in route-input.spec.ts).
+  routerAPI(app, async (routes) => ({ accepted: routes.map((route) => ({ route })), rejected: [] }));
 
   return app;
 }

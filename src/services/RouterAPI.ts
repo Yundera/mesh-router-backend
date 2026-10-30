@@ -82,7 +82,8 @@ Note: serverDomain is returned from SERVER_DOMAIN environment variable, not from
 The database field is kept for informational/audit purposes only.
 */
 
-export function routerAPI(expressApp: express.Application) {
+// checkRoutes: the connectivity check on registered routes; tests pass one that accepts all.
+export function routerAPI(expressApp: express.Application, checkRoutes = validateRoutes) {
   let router = express.Router();
 
   /**
@@ -346,7 +347,7 @@ export function routerAPI(expressApp: express.Application) {
       const validatedRoutes: Route[] = routes.map((r: any, index: number) => normalizeRoute(r, index));
 
       // Validate routes - all routes are validated for connectivity
-      const { accepted, rejected } = await validateRoutes(validatedRoutes);
+      const { accepted, rejected } = await checkRoutes(validatedRoutes);
 
       // One-line summary for successful registrations
       if (accepted.length > 0) {

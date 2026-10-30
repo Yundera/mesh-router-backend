@@ -883,8 +883,10 @@ describe("Routes TTL", () => {
       // Agent's TTL should be refreshed (higher than before or same)
       expect(agentTtlAfter).to.be.at.least(agentTtlBefore);
 
-      // Tunnel's TTL should continue to decrease (not refreshed)
-      expect(tunnelTtlAfter).to.be.lessThan(tunnelTtlBefore);
+      // Tunnel's TTL was not refreshed: it keeps the second lost before the agent refresh
+      // (Redis TTLs are whole seconds, so compare with the agent, not with itself).
+      expect(tunnelTtlAfter).to.be.at.most(tunnelTtlBefore);
+      expect(tunnelTtlAfter).to.be.lessThan(agentTtlAfter);
     });
   });
 });
