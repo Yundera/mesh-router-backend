@@ -1,8 +1,10 @@
 import { describe, it } from "mocha";
 import { expect } from "chai";
 import {
-  buildForward, handleInbound, InboundDeps, parseRaw, readInboundForm, tokenMatches, zoneRecipients,
+  buildForward, handleInbound, InboundDeps, parseRaw, readInboundForm, routeRecipients, tokenMatches, zoneRecipients,
 } from "../services/InboundMail.js";
+import { parseMailAliases, DEFAULT_MAIL_ALIASES } from "../configuration/config.js";
+import { isReservedDomain } from "../services/Domain.js";
 
 /**
  * Inbound mail catch-all (SendGrid Inbound Parse → forward). Pure: no Firestore, Redis or
@@ -10,7 +12,8 @@ import {
  */
 
 const ZONE = "inojob.com";
-const CFG = { zone: ZONE, catchall: "team@example.org", spamDrop: 5 };
+const TEAM = "team@example.org";
+const CFG = { zone: ZONE, aliases: { contact: TEAM, admin: TEAM, dmarc: "reports@example.org" }, spamDrop: 5 };
 const PNG = Buffer.from("89504e470d0a1a0a0000000d49484452", "hex");
 
 function rawMail(opts: { messageId?: string; extraHeaders?: string } = {}): string {
@@ -66,7 +69,7 @@ function fields(overrides: Record<string, string | undefined> = {}) {
   };
 }
 
-function fakeDeps(sendStatus: number | Error = 202) {
+function fakeDeps(sendStatus: number | Error | ((payload: Record<string, unknown>) => number) = 202) {
   const claimed = new Set<string>();
   const sent: Array<Record<string, unknown>> = [];
   const released: string[] = [];
@@ -83,7 +86,7 @@ function fakeDeps(sendStatus: number | Error = 202) {
     async send(payload) {
       sent.push(payload);
       if (sendStatus instanceof Error) throw sendStatus;
-      return sendStatus;
+      return typeof sendStatus === "function" ? sendStatus(payload) : sendStatus;
     },
   };
   return { deps, sent, released, claimed };
@@ -122,10 +125,10 @@ describe("inbound mail input checks", () => {
 
 describe("inbound mail forward", () => {
   it("rewrites the sender and keeps body, attachments and inline images", async () => {
-    const payload = buildForward(await parseRaw(rawMail()), [`contact@${ZONE}`], CFG.catchall, ZONE);
+    const payload = buildForward(await parseRaw(rawMail()), [`contact@${ZONE}`], TEAM, ZONE);
     expect(payload.from).to.deep.equal({ email: `contact@${ZONE}`, name: `Bob Sender via ${ZONE}` });
     expect(payload.reply_to).to.deep.equal({ email: "bob@gmail.com", name: "Bob Sender" });
-    expect(payload.personalizations).to.deep.equal([{ to: [{ email: CFG.catchall }] }]);
+    expect(payload.personalizations).to.deep.equal([{ to: [{ email: TEAM }] }]);
     expect(payload.subject).to.equal("Hello there");
 
     const content = payload.content as Array<{ type: string; value: string }>;
@@ -149,7 +152,7 @@ describe("inbound mail forward", () => {
 
   it("prefers the original Reply-To", async () => {
     const parsed = await parseRaw(rawMail({ extraHeaders: "Reply-To: replies@example.net" }));
-    expect(buildForward(parsed, [`contact@${ZONE}`], CFG.catchall, ZONE).reply_to).to.deep.equal({ email: "replies@example.net" });
+    expect(buildForward(parsed, [`contact@${ZONE}`], TEAM, ZONE).reply_to).to.deep.equal({ email: "replies@example.net" });
   });
 
   it("forwards once and drops the retry of a handled message", async () => {
@@ -177,9 +180,9 @@ describe("inbound mail forward", () => {
     }
   });
 
-  it("refuses with a retry while the catch-all target is in the zone", async () => {
+  it("refuses with a retry while an alias target is in the zone", async () => {
     const { deps, sent } = fakeDeps();
-    const looping = { ...CFG, catchall: `contact@${ZONE}` };
+    const looping = { ...CFG, aliases: { contact: `team@${ZONE}` } };
     expect(await handleInbound(fields(), looping, deps)).to.deep.equal({ status: 503, result: "invalid" });
     expect(sent).to.have.length(0);
   });
@@ -188,5 +191,61 @@ describe("inbound mail forward", () => {
     const { deps, released } = fakeDeps(413);
     expect(await handleInbound(fields(), CFG, deps)).to.deep.equal({ status: 200, result: "refused" });
     expect(released).to.have.length(0);
+  });
+});
+
+describe("inbound mail aliases", () => {
+  it("parses MAIL_ALIASES with a default target and per-alias targets", () => {
+    expect(parseMailAliases(undefined, TEAM)).to.deep.equal(Object.fromEntries(DEFAULT_MAIL_ALIASES.map((n) => [n, TEAM])));
+    expect(parseMailAliases(" Contact , dmarc:reports@example.org,bad name, x:nomail", TEAM))
+      .to.deep.equal({ contact: TEAM, dmarc: "reports@example.org" });
+    expect(parseMailAliases("contact,dmarc:reports@example.org", undefined)).to.deep.equal({ dmarc: "reports@example.org" });
+    expect(parseMailAliases(undefined, undefined)).to.deep.equal({});
+  });
+
+  it("reserves every default alias as a user name", () => {
+    for (const name of DEFAULT_MAIL_ALIASES) {
+      expect(isReservedDomain(name), name).to.equal(true);
+    }
+  });
+
+  it("groups recipients by target, strips +tags and leaves the rest unknown", () => {
+    const { targets, unknown } = routeRecipients(
+      [`contact@${ZONE}`, `admin+ops@${ZONE}`, `dmarc@${ZONE}`, `alice@${ZONE}`, `constructor@${ZONE}`], CFG.aliases);
+    expect([...targets.entries()]).to.deep.equal([
+      [TEAM, [`contact@${ZONE}`, `admin+ops@${ZONE}`]],
+      ["reports@example.org", [`dmarc@${ZONE}`]],
+    ]);
+    expect(unknown).to.deep.equal([`alice@${ZONE}`, `constructor@${ZONE}`]);
+  });
+
+  it("drops mail to an address that is no alias", async () => {
+    const { deps, sent } = fakeDeps();
+    const outcome = await handleInbound(fields({ envelope: JSON.stringify({ to: [`alice@${ZONE}`] }) }), CFG, deps);
+    expect(outcome).to.deep.equal({ status: 200, result: "no-recipient" });
+    expect(sent).to.have.length(0);
+  });
+
+  it("sends one copy per target, from the first alias it was addressed to", async () => {
+    const { deps, sent } = fakeDeps();
+    const envelope = JSON.stringify({ to: [`admin@${ZONE}`, `contact@${ZONE}`, `dmarc@${ZONE}`, `alice@${ZONE}`] });
+    expect(await handleInbound(fields({ envelope }), CFG, deps)).to.deep.equal({ status: 200, result: "forwarded" });
+    expect(sent.map((p) => [(p.personalizations as any)[0].to[0].email, (p.from as any).email])).to.deep.equal([
+      [TEAM, `admin@${ZONE}`],
+      ["reports@example.org", `dmarc@${ZONE}`],
+    ]);
+  });
+
+  it("on a partial failure, the retry re-sends only the copy that failed", async () => {
+    let failReports = true;
+    const { deps, sent } = fakeDeps((p) => {
+      const target = (p.personalizations as any)[0].to[0].email;
+      return target === "reports@example.org" && failReports ? 503 : 202;
+    });
+    const envelope = JSON.stringify({ to: [`contact@${ZONE}`, `dmarc@${ZONE}`] });
+    expect(await handleInbound(fields({ envelope }), CFG, deps)).to.deep.equal({ status: 502, result: "refused" });
+    failReports = false;
+    expect(await handleInbound(fields({ envelope }), CFG, deps)).to.deep.equal({ status: 200, result: "forwarded" });
+    expect(sent.map((p) => (p.personalizations as any)[0].to[0].email)).to.deep.equal([TEAM, "reports@example.org", "reports@example.org"]);
   });
 });

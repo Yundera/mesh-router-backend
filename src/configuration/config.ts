@@ -253,19 +253,51 @@ export function getDnsStaticZoneFile(): string | undefined {
   return process.env.DNS_STATIC_ZONE_FILE?.trim() || undefined;
 }
 
+/** The zone's own addresses when MAIL_ALIASES is not set (doc/USER_MAIL.md §5.6). */
+export const DEFAULT_MAIL_ALIASES = ["contact", "admin", "abuse", "postmaster", "dmarc"];
+
+/**
+ * Parses MAIL_ALIASES: comma-separated `name` (forwarded to the default target) or
+ * `name:target` entries. Names are lowercased; an entry without a target while there is no
+ * default, or with a malformed name, is skipped with a warning.
+ */
+export function parseMailAliases(list: string | undefined, defaultTarget: string | undefined): Record<string, string> {
+  const entries = list?.trim() ? list.split(",") : DEFAULT_MAIL_ALIASES;
+  const aliases: Record<string, string> = {};
+  for (const entry of entries) {
+    const [rawName, ...rest] = entry.split(":");
+    const name = rawName.trim().toLowerCase();
+    const target = rest.join(":").trim() || defaultTarget;
+    if (!name) {
+      continue;
+    }
+    if (!/^[a-z0-9._-]+$/.test(name) || !target || !target.includes("@")) {
+      console.warn(`[MAIL IN] MAIL_ALIASES: skipping '${entry.trim()}' (bad name or no target)`);
+      continue;
+    }
+    aliases[name] = target;
+  }
+  return aliases;
+}
+
 /**
  * Inbound mail (SendGrid Inbound Parse → POST /email/inbound/:token), doc/USER_MAIL.md.
- * Returns undefined, which turns the endpoint off, unless both MAIL_INBOUND_TOKEN (the
- * secret path segment of the parse URL) and MAIL_CATCHALL (the address every message of
- * the zone is forwarded to) are set. MAIL_SPAM_DROP is the SpamAssassin score from which
- * a message is dropped instead of forwarded (default 5, SpamAssassin's own threshold).
+ * Returns undefined, which turns the endpoint off, unless MAIL_INBOUND_TOKEN (the secret
+ * path segment of the parse URL) is set and at least one alias has a target. The zone's
+ * aliases (MAIL_ALIASES, default contact/admin/abuse/postmaster/dmarc) are forwarded to
+ * MAIL_ALIAS_TARGET unless an entry names its own; every other address is dropped.
+ * MAIL_SPAM_DROP is the SpamAssassin score from which a message is dropped instead of
+ * forwarded (default 5, SpamAssassin's own threshold).
  */
-export function getInboundMailConfig(): { token: string; catchall: string; spamDrop: number } | undefined {
+export function getInboundMailConfig(): { token: string; aliases: Record<string, string>; spamDrop: number } | undefined {
   const token = process.env.MAIL_INBOUND_TOKEN?.trim();
-  const catchall = process.env.MAIL_CATCHALL?.trim();
-  if (!token || !catchall) {
+  if (!token) {
+    return undefined;
+  }
+  const aliases = parseMailAliases(process.env.MAIL_ALIASES, process.env.MAIL_ALIAS_TARGET?.trim() || undefined);
+  if (Object.keys(aliases).length === 0) {
     return undefined;
   }
   const spamDrop = parseFloat(process.env.MAIL_SPAM_DROP || "");
-  return { token, catchall, spamDrop: isNaN(spamDrop) ? 5 : spamDrop };
+  return { token, aliases, spamDrop: isNaN(spamDrop) ? 5 : spamDrop };
 }

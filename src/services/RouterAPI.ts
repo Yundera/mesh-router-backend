@@ -770,8 +770,9 @@ export function routerAPI(expressApp: express.Application) {
 
   /**
    * POST /email/inbound/:token
-   * SendGrid Inbound Parse webhook for the zone's MX: forwards every message addressed to
-   * the zone to MAIL_CATCHALL (InboundMail.ts, doc/USER_MAIL.md phase 0). The token is the
+   * SendGrid Inbound Parse webhook for the zone's MX: forwards mail to the zone's aliases
+   * (MAIL_ALIASES → MAIL_ALIAS_TARGET) and drops the rest (InboundMail.ts, doc/USER_MAIL.md
+   * phase 0.5). The token is the
    * only authentication (Inbound Parse signs nothing); 404 while the feature is off.
    * 5xx only when SendGrid could not take the forward, so Inbound Parse retries.
    */

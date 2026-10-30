@@ -70,6 +70,8 @@ const RESERVED_DOMAINS = [
   "root", "app", "www",
   "ip", "ns", "ns1", "ns2", "ns3", "ns4", "ns5", "ns6", "ns7", "ns8", "ns9",
   "gw", "gateway", "mail", "acme", "router", "s1", "s2", "dns", "entrypoint",
+  // The zone's mail aliases (doc/USER_MAIL.md §2.1): <user>@<zone> must never be one of them.
+  "contact", "admin", "abuse", "postmaster", "dmarc",
 ];
 
 export function isReservedDomain(domain: string): boolean {

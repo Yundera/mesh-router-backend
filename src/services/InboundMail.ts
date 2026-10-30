@@ -4,19 +4,20 @@ import { getSendgridApiKey } from "../configuration/config.js";
 import { getRedisClient } from "../redis/redisClient.js";
 
 /**
- * Inbound mail for the zone, phase 0 of doc/USER_MAIL.md: the catch-all that replaces
- * Cloudflare Email Routing.
+ * Inbound mail for the zone, phase 0.5 of doc/USER_MAIL.md: the zone's aliases (contact@,
+ * admin@, …), which replace Cloudflare Email Routing.
  *
  * The zone's MX is SendGrid (mx.sendgrid.net); Inbound Parse posts each message here as
  * multipart/form-data with the raw MIME ("POST the raw, full MIME message"), the envelope
- * and a SpamAssassin score. Every message addressed to the zone is forwarded to one
- * address (MAIL_CATCHALL), mailing-list style: re-sending the original From through our
+ * and a SpamAssassin score. A message to an alias (`contact@`, `contact+tag@`) is forwarded
+ * to that alias's target, mailing-list style; mail to any other address of the zone is dropped: re-sending the original From through our
  * SendGrid would fail the sender's DMARC, so the copy comes from the address it was sent
  * to ("Bob via nsl.sh" <contact@nsl.sh>) with Reply-To set to the original sender.
  *
  * Answers: 2xx when the message is done with (forwarded, or deliberately dropped: spam,
- * duplicate, not for the zone, loop, refused by SendGrid), 5xx when SendGrid could not be
- * reached, so Inbound Parse retries. Retries are deduplicated on the Message-ID.
+ * duplicate, unknown address, loop, refused by SendGrid), 5xx when SendGrid could not be
+ * reached, so Inbound Parse retries. Each target is claimed separately (Message-ID +
+ * target), so a retry re-sends only the copies that failed.
  */
 
 /** Inbound Parse caps a message at 30 MB; the form adds its own fields around it. */
@@ -36,7 +37,8 @@ export interface InboundFields {
 
 export interface InboundConfig {
   zone: string;
-  catchall: string;
+  /** Alias local part (lowercase, no +tag) → address it is forwarded to. */
+  aliases: Record<string, string>;
   spamDrop: number;
 }
 
@@ -171,10 +173,29 @@ export function parseRaw(raw: string): Promise<ParsedMail> {
   return simpleParser(raw, { keepCidLinks: true });
 }
 
-/** Dedupe key of a message: its Message-ID, or the raw bytes when it has none. */
-export function messageKey(parsed: ParsedMail, raw: string): string {
+/** Dedupe key of one forwarded copy: the Message-ID (or the raw bytes without one) and the target. */
+export function messageKey(parsed: ParsedMail, raw: string, target: string): string {
   const id = parsed.messageId?.trim();
-  return "mail:in:" + createHash("sha256").update(id || raw).digest("hex");
+  return "mail:in:" + createHash("sha256").update(id || raw).update("\n" + target.toLowerCase()).digest("hex");
+}
+
+/**
+ * Groups the zone recipients by the target they are forwarded to. `contact+tag@` is the
+ * alias `contact`; recipients that are no alias land in `unknown`.
+ */
+export function routeRecipients(recipients: string[], aliases: Record<string, string>): { targets: Map<string, string[]>; unknown: string[] } {
+  const targets = new Map<string, string[]>();
+  const unknown: string[] = [];
+  for (const addr of recipients) {
+    const local = addr.slice(0, addr.lastIndexOf("@")).split("+")[0];
+    const target = Object.prototype.hasOwnProperty.call(aliases, local) ? aliases[local] : undefined;
+    if (!target) {
+      unknown.push(addr);
+      continue;
+    }
+    targets.set(target, [...(targets.get(target) || []), addr]);
+  }
+  return { targets, unknown };
 }
 
 /** Sender domain only: logs never carry the full sender, the subject or the body. */
@@ -183,62 +204,96 @@ function senderDomain(parsed: ParsedMail): string {
 }
 
 export async function handleInbound(fields: InboundFields, cfg: InboundConfig, deps: InboundDeps): Promise<InboundOutcome> {
-  // A target in the zone comes straight back through the zone's MX and is dropped as a loop.
-  // Refuse with a 5xx instead, so Inbound Parse keeps retrying until the config is fixed.
-  if (cfg.catchall.toLowerCase().endsWith(`@${cfg.zone.toLowerCase()}`)) {
-    console.error(`[MAIL IN] MAIL_CATCHALL ${cfg.catchall} is in ${cfg.zone}: it would loop, set an address outside the zone`);
-    return { status: 503, result: "invalid" };
-  }
   if (!fields.email) {
     console.warn("[MAIL IN] invalid: no raw message (is 'POST the raw, full MIME message' ticked?)");
     return { status: 200, result: "invalid" };
   }
 
   const recipients = zoneRecipients(fields.envelope, cfg.zone);
-  if (recipients.length === 0) {
-    console.log(`[MAIL IN] no-recipient: envelope has no address in ${cfg.zone}`);
+  const { targets, unknown } = routeRecipients(recipients, cfg.aliases);
+  if (unknown.length > 0) {
+    console.log(`[MAIL IN] dropped, no such address: to=${unknown.join(",")}`);
+  }
+  if (targets.size === 0) {
+    if (recipients.length === 0) {
+      console.log(`[MAIL IN] no-recipient: envelope has no address in ${cfg.zone}`);
+    }
     return { status: 200, result: "no-recipient" };
+  }
+
+  // A target in the zone comes straight back through the zone's MX and is dropped as a loop.
+  // Refuse with a 5xx instead, so Inbound Parse keeps retrying until the config is fixed.
+  const zoneSuffix = `@${cfg.zone.toLowerCase()}`;
+  const looping = [...targets.keys()].filter((target) => target.toLowerCase().endsWith(zoneSuffix));
+  if (looping.length > 0) {
+    console.error(`[MAIL IN] alias target ${looping.join(",")} is in ${cfg.zone}: it would loop, set an address outside the zone`);
+    return { status: 503, result: "invalid" };
   }
 
   const score = parseFloat(fields.spam_score || "");
   const parsed = await parseRaw(fields.email);
   const from = senderDomain(parsed);
   const size = Buffer.byteLength(fields.email);
+  const to = [...targets.values()].flat().join(",");
 
   if (!isNaN(score) && score >= cfg.spamDrop) {
-    console.log(`[MAIL IN] spam: from=@${from} to=${recipients.join(",")} score=${score} size=${size}`);
+    console.log(`[MAIL IN] spam: from=@${from} to=${to} score=${score} size=${size}`);
     return { status: 200, result: "spam" };
   }
   if (parsed.headers.has(LOOP_HEADER.toLowerCase())) {
-    console.warn(`[MAIL IN] loop: from=@${from} to=${recipients.join(",")} already forwarded`);
+    console.warn(`[MAIL IN] loop: from=@${from} to=${to} already forwarded`);
     return { status: 200, result: "loop" };
   }
 
-  const key = messageKey(parsed, fields.email);
+  // One copy per target; the message's answer is the worst of them: any copy to retry → 5xx.
+  const results: InboundResult[] = [];
+  let retry = false;
+  for (const [target, addrs] of targets) {
+    const outcome = await forwardOne(parsed, fields.email, addrs, target, cfg.zone, deps, { from, size, score });
+    retry = retry || outcome.status >= 500;
+    results.push(outcome.result);
+  }
+  if (retry) {
+    return { status: 502, result: "refused" };
+  }
+  for (const result of ["forwarded", "refused", "duplicate"] as const) {
+    if (results.includes(result)) {
+      return { status: 200, result };
+    }
+  }
+  return { status: 200, result: "refused" };
+}
+
+async function forwardOne(
+  parsed: ParsedMail, raw: string, recipients: string[], target: string, zone: string, deps: InboundDeps,
+  log: { from: string; size: number; score: number },
+): Promise<InboundOutcome> {
+  const to = recipients.join(",");
+  const key = messageKey(parsed, raw, target);
   if (!(await deps.claim(key))) {
-    console.log(`[MAIL IN] duplicate: from=@${from} to=${recipients.join(",")}`);
+    console.log(`[MAIL IN] duplicate: from=@${log.from} to=${to}`);
     return { status: 200, result: "duplicate" };
   }
 
   let status: number;
   try {
-    status = await deps.send(buildForward(parsed, recipients, cfg.catchall, cfg.zone));
+    status = await deps.send(buildForward(parsed, recipients, target, zone));
   } catch (error) {
     await deps.release(key);
-    console.error(`[MAIL IN] SendGrid unreachable, Inbound Parse will retry: from=@${from}`, error);
+    console.error(`[MAIL IN] SendGrid unreachable, Inbound Parse will retry: from=@${log.from} to=${to}`, error);
     return { status: 502, result: "refused" };
   }
   if (status === 202) {
-    console.log(`[MAIL IN] forwarded: from=@${from} to=${recipients.join(",")} size=${size} score=${isNaN(score) ? "?" : score}`);
+    console.log(`[MAIL IN] forwarded: from=@${log.from} to=${to} size=${log.size} score=${isNaN(log.score) ? "?" : log.score}`);
     return { status: 200, result: "forwarded" };
   }
   if (status === 429 || status >= 500) {
     await deps.release(key);
-    console.error(`[MAIL IN] SendGrid answered ${status}, Inbound Parse will retry: from=@${from}`);
+    console.error(`[MAIL IN] SendGrid answered ${status}, Inbound Parse will retry: from=@${log.from} to=${to}`);
     return { status: 502, result: "refused" };
   }
   // Any other 4xx is permanent for this message (too big, invalid content): retrying cannot help.
-  console.error(`[MAIL IN] dropped, SendGrid refused it (${status}): from=@${from} to=${recipients.join(",")} size=${size}`);
+  console.error(`[MAIL IN] dropped, SendGrid refused it (${status}): from=@${log.from} to=${to} size=${log.size}`);
   return { status: 200, result: "refused" };
 }
 
