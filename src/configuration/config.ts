@@ -262,6 +262,9 @@ export const DEFAULT_MAIL_ALIASES = ["contact", "admin", "abuse", "postmaster", 
  * default, or with a malformed name, is skipped with a warning.
  */
 export function parseMailAliases(list: string | undefined, defaultTarget: string | undefined): Record<string, string> {
+  if (!list?.trim() && !defaultTarget) {
+    return {};
+  }
   const entries = list?.trim() ? list.split(",") : DEFAULT_MAIL_ALIASES;
   const aliases: Record<string, string> = {};
   for (const entry of entries) {
@@ -282,22 +285,31 @@ export function parseMailAliases(list: string | undefined, defaultTarget: string
 
 /**
  * Inbound mail (SendGrid Inbound Parse → POST /email/inbound/:token), doc/USER_MAIL.md.
- * Returns undefined, which turns the endpoint off, unless MAIL_INBOUND_TOKEN (the secret
- * path segment of the parse URL) is set and at least one alias has a target. The zone's
- * aliases (MAIL_ALIASES, default contact/admin/abuse/postmaster/dmarc) are forwarded to
- * MAIL_ALIAS_TARGET unless an entry names its own; every other address is dropped.
+ * Returns undefined, which turns the endpoint off (and users' forwarding with it), unless
+ * MAIL_INBOUND_TOKEN (the secret path segment of the parse URL) is set. The zone's aliases
+ * (MAIL_ALIASES, default contact/admin/abuse/postmaster/dmarc) are forwarded to
+ * MAIL_ALIAS_TARGET unless an entry names its own; without either, there are none. Other
+ * addresses are users' (UserMail.ts) or dropped.
  * MAIL_SPAM_DROP is the SpamAssassin score from which a message is dropped instead of
- * forwarded (default 5, SpamAssassin's own threshold).
+ * forwarded (default 5, SpamAssassin's own threshold). MAIL_FORWARD_DAILY caps the messages
+ * forwarded per user per day (default 100).
  */
-export function getInboundMailConfig(): { token: string; aliases: Record<string, string>; spamDrop: number } | undefined {
+export function getInboundMailConfig(): { token: string; aliases: Record<string, string>; spamDrop: number; forwardPerDay: number } | undefined {
   const token = process.env.MAIL_INBOUND_TOKEN?.trim();
   if (!token) {
     return undefined;
   }
   const aliases = parseMailAliases(process.env.MAIL_ALIASES, process.env.MAIL_ALIAS_TARGET?.trim() || undefined);
-  if (Object.keys(aliases).length === 0) {
-    return undefined;
-  }
   const spamDrop = parseFloat(process.env.MAIL_SPAM_DROP || "");
-  return { token, aliases, spamDrop: isNaN(spamDrop) ? 5 : spamDrop };
+  const forwardPerDay = parseInt(process.env.MAIL_FORWARD_DAILY || "", 10);
+  return { token, aliases, spamDrop: isNaN(spamDrop) ? 5 : spamDrop, forwardPerDay: forwardPerDay > 0 ? forwardPerDay : 100 };
+}
+
+/**
+ * Public base of this API for links in mail (the forwarding confirmation link):
+ * MAIL_CONFIRM_BASE, else https://<SERVER_DOMAIN>/router/api, where the zone's gateway
+ * serves it.
+ */
+export function getMailConfirmBase(): string {
+  return (process.env.MAIL_CONFIRM_BASE?.trim() || `https://${getServerDomain()}/router/api`).replace(/\/+$/, "");
 }

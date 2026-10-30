@@ -13,7 +13,12 @@ import { isReservedDomain } from "../services/Domain.js";
 
 const ZONE = "inojob.com";
 const TEAM = "team@example.org";
-const CFG = { zone: ZONE, aliases: { contact: TEAM, admin: TEAM, dmarc: "reports@example.org" }, spamDrop: 5 };
+const CFG = { zone: ZONE, aliases: { contact: TEAM, admin: TEAM, dmarc: "reports@example.org" }, spamDrop: 5, forwardPerDay: 2 };
+/** Users with an active forward, by label. */
+const USERS: Record<string, { uid: string; target: string }> = {
+  alice: { uid: "uid-alice", target: "alice.home@example.net" },
+  bob: { uid: "uid-bob", target: "bob@example.net" },
+};
 const PNG = Buffer.from("89504e470d0a1a0a0000000d49484452", "hex");
 
 function rawMail(opts: { messageId?: string; extraHeaders?: string } = {}): string {
@@ -73,7 +78,15 @@ function fakeDeps(sendStatus: number | Error | ((payload: Record<string, unknown
   const claimed = new Set<string>();
   const sent: Array<Record<string, unknown>> = [];
   const released: string[] = [];
+  const forwards = new Map<string, number>();
   const deps: InboundDeps = {
+    async findUser(label) {
+      return USERS[label];
+    },
+    async allowForward(uid, perDay) {
+      forwards.set(uid, (forwards.get(uid) || 0) + 1);
+      return forwards.get(uid)! <= perDay;
+    },
     async claim(key) {
       if (claimed.has(key)) return false;
       claimed.add(key);
@@ -219,16 +232,16 @@ describe("inbound mail aliases", () => {
     expect(unknown).to.deep.equal([`alice@${ZONE}`, `constructor@${ZONE}`]);
   });
 
-  it("drops mail to an address that is no alias", async () => {
+  it("drops mail to an address that is no alias and no user", async () => {
     const { deps, sent } = fakeDeps();
-    const outcome = await handleInbound(fields({ envelope: JSON.stringify({ to: [`alice@${ZONE}`] }) }), CFG, deps);
+    const outcome = await handleInbound(fields({ envelope: JSON.stringify({ to: [`carol@${ZONE}`] }) }), CFG, deps);
     expect(outcome).to.deep.equal({ status: 200, result: "no-recipient" });
     expect(sent).to.have.length(0);
   });
 
   it("sends one copy per target, from the first alias it was addressed to", async () => {
     const { deps, sent } = fakeDeps();
-    const envelope = JSON.stringify({ to: [`admin@${ZONE}`, `contact@${ZONE}`, `dmarc@${ZONE}`, `alice@${ZONE}`] });
+    const envelope = JSON.stringify({ to: [`admin@${ZONE}`, `contact@${ZONE}`, `dmarc@${ZONE}`, `carol@${ZONE}`] });
     expect(await handleInbound(fields({ envelope }), CFG, deps)).to.deep.equal({ status: 200, result: "forwarded" });
     expect(sent.map((p) => [(p.personalizations as any)[0].to[0].email, (p.from as any).email])).to.deep.equal([
       [TEAM, `admin@${ZONE}`],
@@ -247,5 +260,59 @@ describe("inbound mail aliases", () => {
     failReports = false;
     expect(await handleInbound(fields({ envelope }), CFG, deps)).to.deep.equal({ status: 200, result: "forwarded" });
     expect(sent.map((p) => (p.personalizations as any)[0].to[0].email)).to.deep.equal([TEAM, "reports@example.org", "reports@example.org"]);
+  });
+});
+
+describe("inbound mail user forwards", () => {
+  const targetOf = (p: Record<string, unknown>) => (p.personalizations as any)[0].to[0].email;
+
+  it("forwards <user>@, <user>+tag@ and <app>.<user>@ once to the user's target", async () => {
+    const { deps, sent } = fakeDeps();
+    const envelope = JSON.stringify({ to: [`alice@${ZONE}`, `alice+shop@${ZONE}`, `vaultwarden.alice@${ZONE}`] });
+    expect(await handleInbound(fields({ envelope }), CFG, deps)).to.deep.equal({ status: 200, result: "forwarded" });
+    expect(sent).to.have.length(1);
+    expect(targetOf(sent[0])).to.equal("alice.home@example.net");
+    expect((sent[0].from as any).email).to.equal(`alice@${ZONE}`);
+    expect((sent[0].headers as any)["X-Original-To"]).to.equal(`alice@${ZONE}, alice+shop@${ZONE}, vaultwarden.alice@${ZONE}`);
+  });
+
+  it("drops users without an active forward and malformed local parts", async () => {
+    const { deps, sent } = fakeDeps();
+    for (const to of [`carol@${ZONE}`, `a.b.alice@${ZONE}`, `toolongappname-xxxxxxxxx.alice@${ZONE}`]) {
+      expect((await handleInbound(fields({ envelope: JSON.stringify({ to: [to] }) }), CFG, deps)).result, to).to.equal("no-recipient");
+    }
+    expect(sent).to.have.length(0);
+  });
+
+  it("sends aliases and users to their own targets in one message", async () => {
+    const { deps, sent } = fakeDeps();
+    const envelope = JSON.stringify({ to: [`contact@${ZONE}`, `bob@${ZONE}`, `alice@${ZONE}`] });
+    expect((await handleInbound(fields({ envelope }), CFG, deps)).result).to.equal("forwarded");
+    expect(sent.map(targetOf)).to.deep.equal([TEAM, "bob@example.net", "alice.home@example.net"]);
+  });
+
+  it("caps forwards per user and day, not aliases", async () => {
+    const { deps, sent } = fakeDeps();
+    const envelope = JSON.stringify({ to: [`alice@${ZONE}`, `contact@${ZONE}`] });
+    for (let i = 1; i <= 3; i++) {
+      await handleInbound(fields({ envelope, email: rawMail({ messageId: `<m${i}@x>` }) }), CFG, deps);
+    }
+    expect(sent.filter((p) => targetOf(p) === "alice.home@example.net")).to.have.length(2);
+    expect(sent.filter((p) => targetOf(p) === TEAM)).to.have.length(3);
+    const { deps: d2 } = fakeDeps();
+    await handleInbound(fields({ envelope: JSON.stringify({ to: [`alice@${ZONE}`] }), email: rawMail({ messageId: "<n1@x>" }) }), CFG, d2);
+    await handleInbound(fields({ envelope: JSON.stringify({ to: [`alice@${ZONE}`] }), email: rawMail({ messageId: "<n2@x>" }) }), CFG, d2);
+    expect(await handleInbound(fields({ envelope: JSON.stringify({ to: [`alice@${ZONE}`] }), email: rawMail({ messageId: "<n3@x>" }) }), CFG, d2))
+      .to.deep.equal({ status: 200, result: "refused" });
+  });
+
+  it("does not count spam against the cap", async () => {
+    const { deps, sent } = fakeDeps();
+    const envelope = JSON.stringify({ to: [`alice@${ZONE}`] });
+    for (let i = 1; i <= 3; i++) {
+      await handleInbound(fields({ envelope, spam_score: "9", email: rawMail({ messageId: `<s${i}@x>` }) }), CFG, deps);
+    }
+    expect((await handleInbound(fields({ envelope }), CFG, deps)).result).to.equal("forwarded");
+    expect(sent).to.have.length(1);
   });
 });

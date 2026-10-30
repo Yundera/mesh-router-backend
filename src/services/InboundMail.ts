@@ -2,15 +2,18 @@ import { createHash, timingSafeEqual } from "node:crypto";
 import { simpleParser, ParsedMail, AddressObject, EmailAddress } from "mailparser";
 import { getSendgridApiKey } from "../configuration/config.js";
 import { getRedisClient } from "../redis/redisClient.js";
+import { allowForward, findForward, userLabel } from "./UserMail.js";
 
 /**
- * Inbound mail for the zone, phase 0.5 of doc/USER_MAIL.md: the zone's aliases (contact@,
- * admin@, …), which replace Cloudflare Email Routing.
+ * Inbound mail for the zone, phases 0.5 and 1 of doc/USER_MAIL.md: the zone's aliases
+ * (contact@, admin@, …), which replace Cloudflare Email Routing, and users' forwards.
  *
  * The zone's MX is SendGrid (mx.sendgrid.net); Inbound Parse posts each message here as
  * multipart/form-data with the raw MIME ("POST the raw, full MIME message"), the envelope
  * and a SpamAssassin score. A message to an alias (`contact@`, `contact+tag@`) is forwarded
- * to that alias's target, mailing-list style; mail to any other address of the zone is dropped: re-sending the original From through our
+ * to that alias's target; one to a user (`alice@`, `alice+tag@`, `<app>.alice@`) to the
+ * address the user confirmed (UserMail.ts), within a daily cap. Mail to any other address
+ * of the zone is dropped. Forwarding is mailing-list style: re-sending the original From through our
  * SendGrid would fail the sender's DMARC, so the copy comes from the address it was sent
  * to ("Bob via nsl.sh" <contact@nsl.sh>) with Reply-To set to the original sender.
  *
@@ -40,6 +43,8 @@ export interface InboundConfig {
   /** Alias local part (lowercase, no +tag) → address it is forwarded to. */
   aliases: Record<string, string>;
   spamDrop: number;
+  /** Messages forwarded per user per day; aliases are not capped. */
+  forwardPerDay: number;
 }
 
 export type InboundResult = "forwarded" | "duplicate" | "spam" | "no-recipient" | "loop" | "invalid" | "refused";
@@ -57,6 +62,10 @@ export interface InboundDeps {
   release(key: string): Promise<void>;
   /** Sends a SendGrid v3 payload; returns the HTTP status (202 = accepted). */
   send(payload: Record<string, unknown>): Promise<number>;
+  /** The user a label belongs to and the address their mail goes to, when forwarding is active. */
+  findUser(label: string): Promise<{ uid: string; target: string } | undefined>;
+  /** Counts one forwarded message for the user; false once over the daily cap. */
+  allowForward(uid: string, perDay: number): Promise<boolean>;
 }
 
 /** Constant-time comparison of the URL token. */
@@ -211,8 +220,26 @@ export async function handleInbound(fields: InboundFields, cfg: InboundConfig, d
 
   const recipients = zoneRecipients(fields.envelope, cfg.zone);
   const { targets, unknown } = routeRecipients(recipients, cfg.aliases);
-  if (unknown.length > 0) {
-    console.log(`[MAIL IN] dropped, no such address: to=${unknown.join(",")}`);
+
+  // Not an alias: a user with an active forward, or nobody.
+  const users = new Map<string, { uid: string; target: string; addrs: string[] }>();
+  const nobody: string[] = [];
+  for (const addr of unknown) {
+    const label = userLabel(addr.slice(0, addr.lastIndexOf("@")));
+    const user = label ? await deps.findUser(label) : undefined;
+    if (!user) {
+      nobody.push(addr);
+      continue;
+    }
+    const entry = users.get(user.uid) || { ...user, addrs: [] };
+    entry.addrs.push(addr);
+    users.set(user.uid, entry);
+  }
+  if (nobody.length > 0) {
+    console.log(`[MAIL IN] dropped, no such address or forwarding off: to=${nobody.join(",")}`);
+  }
+  for (const user of users.values()) {
+    targets.set(user.target, [...(targets.get(user.target) || []), ...user.addrs]);
   }
   if (targets.size === 0) {
     if (recipients.length === 0) {
@@ -243,6 +270,23 @@ export async function handleInbound(fields: InboundFields, cfg: InboundConfig, d
   if (parsed.headers.has(LOOP_HEADER.toLowerCase())) {
     console.warn(`[MAIL IN] loop: from=@${from} to=${to} already forwarded`);
     return { status: 200, result: "loop" };
+  }
+
+  // The daily cap, counted once per user and message, after the spam and loop drops.
+  for (const user of users.values()) {
+    if (await deps.allowForward(user.uid, cfg.forwardPerDay)) {
+      continue;
+    }
+    console.warn(`[MAIL IN] dropped, over ${cfg.forwardPerDay} forwards today: to=${user.addrs.join(",")}`);
+    const rest = (targets.get(user.target) || []).filter((addr) => !user.addrs.includes(addr));
+    if (rest.length > 0) {
+      targets.set(user.target, rest);
+    } else {
+      targets.delete(user.target);
+    }
+  }
+  if (targets.size === 0) {
+    return { status: 200, result: "refused" };
   }
 
   // One copy per target; the message's answer is the worst of them: any copy to retry → 5xx.
@@ -299,6 +343,8 @@ async function forwardOne(
 
 /** The production dependencies: Redis for the dedupe claim, SendGrid v3 for the send. */
 export const inboundDeps: InboundDeps = {
+  findUser: findForward,
+  allowForward,
   async claim(key) {
     return (await getRedisClient().set(key, "1", "EX", DEDUPE_TTL_SECONDS, "NX")) === "OK";
   },

@@ -2,7 +2,7 @@ import express, { Request } from "express";
 import {verifySignature} from "../library/KeyLib.js";
 import {authenticate, authenticateService, AuthUserRequest} from "./ExpressAuthenticateMiddleWare.js";
 import {checkDomainAvailability, deleteUserDomain, getUserDomain, updateUserDomain, checkOnlineStatus, getDomain, updateLastRouteRegistration, getAllUserDomains} from "./Domain.js";
-import {getServerDomain, getInactiveDomainDays, getDnsIpZone, getDnsGatewayIps, getTunnelProviders, getInboundMailConfig} from "../configuration/config.js";
+import {getServerDomain, getInactiveDomainDays, getDnsIpZone, getDnsGatewayIps, getTunnelProviders, getInboundMailConfig, getMailConfirmBase} from "../configuration/config.js";
 import {registerRoutes, getRoutes, deleteRoutes, Route, getRoutesTTL, getActiveUserIds, getActivityTimestamp} from "./Routes.js";
 import {validateRoutes, normalizeRoute} from "./RouteValidator.js";
 import {getCACertificate, signCSR, isCAInitialized} from "./CertificateAuthority.js";
@@ -17,6 +17,7 @@ import {NSLRouterData} from "../DataBaseDTO/DataBaseNSLRouter.js";
 import {acmeLabelFromFqdn, addAcmeTxt, isAcmeTxtValue, removeAcmeTxt, takeAcmeUpdate} from "./AcmeDns.js";
 import {verifyEmailCredential, sendUserEmail, EmailError, EmailSendRequest} from "./Email.js";
 import {MAX_INBOUND_BYTES, tokenMatches, readInboundForm, handleInbound, inboundDeps} from "./InboundMail.js";
+import {UserMailError, forwardView, setForward, clearForward, confirmForward, suppressionReason, confirmPage} from "./UserMail.js";
 import { getAuth } from "firebase-admin/auth";
 
 /**
@@ -811,6 +812,117 @@ export function routerAPI(expressApp: express.Application) {
     } catch (error) {
       console.error("Error in POST /email/inbound", error);
       return res.status(500).json({ error: "Inbound mail processing failed." });
+    }
+  });
+
+  /**
+   * The box's own credential (signature over the user id) for /email/forward; undefined
+   * after answering 401.
+   */
+  async function verifiedBox(req: express.Request, res: express.Response) {
+    const userid = String(req.params.userid);
+    const sig = String(req.params.sig);
+    const userData = await getUserDomain(userid);
+    let isValid = false;
+    try {
+      isValid = !!userData?.domainName && await verifySignature(userData.publicKey, sig, userid);
+    } catch {
+      isValid = false;
+    }
+    if (!isValid) {
+      logAuthFailure(req, 'invalid_signature', { userid, endpoint: 'email_forward' });
+      res.status(401).json({ error: "Invalid signature." });
+      return undefined;
+    }
+    return { userid, userData };
+  }
+
+  function forwardError(res: express.Response, route: string, error: any) {
+    if (error instanceof UserMailError) {
+      return res.status(error.status).json({ error: error.message });
+    }
+    console.error(`Error in ${route}`, error);
+    return res.status(500).json({ error: "Mail forwarding update failed." });
+  }
+
+  /**
+   * GET|PUT|DELETE /email/forward/:userid/:sig
+   * The box's mail forwarding (UserMail.ts, doc/USER_MAIL.md phase 1): mail to
+   * <user>@<zone> goes to one external address, after its owner clicked the link sent
+   * there. PUT {target} sets it (pending until confirmed), DELETE turns it off. Answers the
+   * box's view: {enabled, address, state: off|pending|active|paused, target?, reason?}.
+   * Credential: the box's signature over the user id.
+   */
+  router.get('/email/forward/:userid/:sig', async (req, res) => {
+    try {
+      const box = await verifiedBox(req, res);
+      if (!box) return;
+      const mail = box.userData.mail;
+      const paused = mail?.state === "active" ? await suppressionReason(mail.target) : undefined;
+      return res.json(forwardView(mail, `${box.userData.domainName}@${getServerDomain()}`, !!getInboundMailConfig(), paused));
+    } catch (error) {
+      return forwardError(res, "GET /email/forward", error);
+    }
+  });
+
+  router.put('/email/forward/:userid/:sig', async (req, res) => {
+    try {
+      const box = await verifiedBox(req, res);
+      if (!box) return;
+      if (!getInboundMailConfig()) {
+        return res.status(409).json({ error: "This server does not receive mail." });
+      }
+      const zone = getServerDomain();
+      const mail = await setForward(box.userid, box.userData, req.body?.target, zone, getMailConfirmBase());
+      return res.json(forwardView(mail, `${box.userData.domainName}@${zone}`, true));
+    } catch (error) {
+      return forwardError(res, "PUT /email/forward", error);
+    }
+  });
+
+  router.delete('/email/forward/:userid/:sig', async (req, res) => {
+    try {
+      const box = await verifiedBox(req, res);
+      if (!box) return;
+      if (box.userData.mail) {
+        await clearForward(box.userid);
+        console.log(`[MAIL FWD] ${box.userData.domainName}: forwarding turned off`);
+      }
+      return res.json(forwardView(undefined, `${box.userData.domainName}@${getServerDomain()}`, !!getInboundMailConfig()));
+    } catch (error) {
+      return forwardError(res, "DELETE /email/forward", error);
+    }
+  });
+
+  /**
+   * GET|POST /email/confirm/:token
+   * The link in the confirmation email. GET only shows a button: mail scanners prefetch
+   * links, and must not confirm on the owner's behalf. POST activates the forward.
+   */
+  router.get('/email/confirm/:token', (req, res) => {
+    res.type('html').send(confirmPage(
+      "Confirm mail forwarding",
+      "Press the button to start receiving this mail at the address this link was sent to.",
+      { action: `${getMailConfirmBase()}/email/confirm/${encodeURIComponent(String(req.params.token))}`, label: "Confirm forwarding" },
+    ));
+  });
+
+  router.post('/email/confirm/:token', async (req, res) => {
+    try {
+      const done = await confirmForward(String(req.params.token));
+      if (!done) {
+        return res.status(404).type('html').send(confirmPage(
+          "Link expired",
+          "This confirmation link is invalid or has expired. Set the forwarding address again from your box to get a new one.",
+        ));
+      }
+      return res.type('html').send(confirmPage(
+        "Forwarding confirmed",
+        `Mail to ${done.address}@${getServerDomain()} is now forwarded to ${done.target}.`,
+      ));
+    } catch (error) {
+      console.error("Error in POST /email/confirm", error);
+      return res.status(500).type('html').send(confirmPage("Something went wrong", "Try the link again in a few minutes."));
     }
   });
 

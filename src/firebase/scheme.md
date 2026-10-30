@@ -15,6 +15,10 @@ Domain registration data.
 - `publicKey`: string - Ed25519 public key for signature verification
 - `targetPort`: number (optional) - Port where Caddy listens (default: 443)
 - `lastSeenOnline`: string (optional) - ISO timestamp of last heartbeat
+- `mail`: object (optional) - Mail forwarding of `<domainName>@<serverDomain>` (UserMail.ts); absent = off
+  - `target`: string - External address the mail is forwarded to
+  - `state`: `pending` | `active` - pending until the link mailed to `target` is clicked
+  - `confirmHash` / `confirmExpires`: string (pending only) - sha256 of the confirmation token, expiry (48 h)
 - `createdate`: string - Creation timestamp
 - `createdby`: string - Creator user ID
 - `lastupdate`: string - Last update timestamp

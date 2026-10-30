@@ -19,6 +19,21 @@ export interface NSLRouterDns {
     caaAccounts?: string[];
 }
 
+/**
+ * Mail forwarding of <domainName>@<serverDomain> (UserMail.ts, doc/USER_MAIL.md phase 1).
+ * Absent = off.
+ */
+export interface NSLRouterMail {
+    // the external address mail is forwarded to
+    target: string;
+    // pending until the link sent to `target` is clicked
+    state: "pending" | "active";
+    // sha256 of the confirmation token, and when it stops being accepted (pending only)
+    confirmHash?: string;
+    confirmExpires?: string;
+    updatedAt?: string;
+}
+
 export interface NSLRouterData {
     serverDomain: string;
     domainName: string;
@@ -33,6 +48,9 @@ export interface NSLRouterData {
 
     // Nameserver settings (mesh-router-nameserver); absent on most users
     dns?: NSLRouterDns;
+
+    // Mail forwarding; absent = off
+    mail?: NSLRouterMail;
 
     //meta
     id?: string;
