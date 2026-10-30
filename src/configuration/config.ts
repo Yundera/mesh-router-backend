@@ -252,3 +252,20 @@ export function getDnsNsHosts(): string[] {
 export function getDnsStaticZoneFile(): string | undefined {
   return process.env.DNS_STATIC_ZONE_FILE?.trim() || undefined;
 }
+
+/**
+ * Inbound mail (SendGrid Inbound Parse → POST /email/inbound/:token), doc/USER_MAIL.md.
+ * Returns undefined, which turns the endpoint off, unless both MAIL_INBOUND_TOKEN (the
+ * secret path segment of the parse URL) and MAIL_CATCHALL (the address every message of
+ * the zone is forwarded to) are set. MAIL_SPAM_DROP is the SpamAssassin score from which
+ * a message is dropped instead of forwarded (default 5, SpamAssassin's own threshold).
+ */
+export function getInboundMailConfig(): { token: string; catchall: string; spamDrop: number } | undefined {
+  const token = process.env.MAIL_INBOUND_TOKEN?.trim();
+  const catchall = process.env.MAIL_CATCHALL?.trim();
+  if (!token || !catchall) {
+    return undefined;
+  }
+  const spamDrop = parseFloat(process.env.MAIL_SPAM_DROP || "");
+  return { token, catchall, spamDrop: isNaN(spamDrop) ? 5 : spamDrop };
+}

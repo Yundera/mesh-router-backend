@@ -2,7 +2,7 @@ import express, { Request } from "express";
 import {verifySignature} from "../library/KeyLib.js";
 import {authenticate, authenticateService, AuthUserRequest} from "./ExpressAuthenticateMiddleWare.js";
 import {checkDomainAvailability, deleteUserDomain, getUserDomain, updateUserDomain, checkOnlineStatus, getDomain, updateLastRouteRegistration, getAllUserDomains} from "./Domain.js";
-import {getServerDomain, getInactiveDomainDays, getDnsIpZone, getDnsGatewayIps, getTunnelProviders} from "../configuration/config.js";
+import {getServerDomain, getInactiveDomainDays, getDnsIpZone, getDnsGatewayIps, getTunnelProviders, getInboundMailConfig} from "../configuration/config.js";
 import {registerRoutes, getRoutes, deleteRoutes, Route, getRoutesTTL, getActiveUserIds, getActivityTimestamp} from "./Routes.js";
 import {validateRoutes, normalizeRoute} from "./RouteValidator.js";
 import {getCACertificate, signCSR, isCAInitialized} from "./CertificateAuthority.js";
@@ -16,6 +16,7 @@ import {getDnsHealth, httpStatusFor} from "./DnsHealth.js";
 import {NSLRouterData} from "../DataBaseDTO/DataBaseNSLRouter.js";
 import {acmeLabelFromFqdn, addAcmeTxt, isAcmeTxtValue, removeAcmeTxt, takeAcmeUpdate} from "./AcmeDns.js";
 import {verifyEmailCredential, sendUserEmail, EmailError, EmailSendRequest} from "./Email.js";
+import {MAX_INBOUND_BYTES, tokenMatches, readInboundForm, handleInbound, inboundDeps} from "./InboundMail.js";
 import { getAuth } from "firebase-admin/auth";
 
 /**
@@ -764,6 +765,35 @@ export function routerAPI(expressApp: express.Application) {
     } catch (error) {
       console.error("Error in POST /email/send", error);
       return res.status(500).json({ error: error.toString() });
+    }
+  });
+
+  /**
+   * POST /email/inbound/:token
+   * SendGrid Inbound Parse webhook for the zone's MX: forwards every message addressed to
+   * the zone to MAIL_CATCHALL (InboundMail.ts, doc/USER_MAIL.md phase 0). The token is the
+   * only authentication (Inbound Parse signs nothing); 404 while the feature is off.
+   * 5xx only when SendGrid could not take the forward, so Inbound Parse retries.
+   */
+  router.post('/email/inbound/:token', express.raw({ type: 'multipart/form-data', limit: MAX_INBOUND_BYTES }), async (req, res) => {
+    try {
+      const cfg = getInboundMailConfig();
+      if (!cfg) {
+        return res.status(404).json({ error: "Inbound mail is not enabled." });
+      }
+      if (!tokenMatches(req.params.token, cfg.token)) {
+        logAuthFailure(req, 'invalid_inbound_mail_token', { endpoint: 'email_inbound' });
+        return res.status(404).json({ error: "Inbound mail is not enabled." });
+      }
+      if (!Buffer.isBuffer(req.body)) {
+        return res.status(400).json({ error: "Expected multipart/form-data." });
+      }
+      const fields = await readInboundForm(req.body, req.get('content-type') || '');
+      const outcome = await handleInbound(fields, { ...cfg, zone: getServerDomain() }, inboundDeps);
+      return res.status(outcome.status).json({ result: outcome.result });
+    } catch (error) {
+      console.error("Error in POST /email/inbound", error);
+      return res.status(500).json({ error: "Inbound mail processing failed." });
     }
   });
 
