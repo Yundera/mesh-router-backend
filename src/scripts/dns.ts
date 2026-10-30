@@ -205,7 +205,6 @@ async function sync(target: string | undefined, argv: string[]): Promise<void> {
       ? await syncUser({ uid, label: data.domainName, dns: data.dns }, dryRun)
       : await writeDormant(data.domainName, dryRun);
     console.log(`${r.zone}: ${isInScope(data) ? "live" : "dormant"}, ${r.created ? "created, " : ""}answer ${r.answer.kind} ${r.answer.ips.join(",")} (${r.answer.reason})`);
-    console.log(`${r.zone}: ${r.created ? "created, " : ""}answer ${r.answer.kind} ${r.answer.ips.join(",")} (${r.answer.reason})`);
     (r.changed.length ? r.changed : ["no change"]).forEach((c) => console.log(`  ${c}`));
     return;
   }
