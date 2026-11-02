@@ -18,7 +18,7 @@ import * as pdns from "../services/PowerDns.js";
  * skipped without PDNS_API_URL (see dns-zones.spec.ts for the command).
  */
 
-process.env.SERVER_DOMAIN = process.env.SERVER_DOMAIN || "test.example.com";
+process.env.SERVER_DOMAIN = "test.example.com"; // unconditional: the dev .env sets a real zone, and specs share one process
 process.env.DNS_GATEWAY_IPS = "192.0.2.10,192.0.2.11";
 process.env.DNS_NS_HOSTS = "ns1.test.example.com,ns2.test.example.com";
 

@@ -5,7 +5,7 @@ import { desiredApexRRsets } from "../services/DnsZones.js";
 
 /** The static zone file of SERVER_DOMAIN and the apex zone built from it. Pure: no services. */
 
-process.env.SERVER_DOMAIN = process.env.SERVER_DOMAIN || "test.example.com";
+process.env.SERVER_DOMAIN = "test.example.com"; // unconditional: the dev .env sets a real zone, and specs share one process
 
 const ZONE = "test.example.com";
 

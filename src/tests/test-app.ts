@@ -4,7 +4,7 @@ import { initializeFb } from "../firebase/firebaseIntegration.js";
 import { routerAPI } from "../services/RouterAPI.js";
 
 // Set test environment variables
-process.env.SERVER_DOMAIN = process.env.SERVER_DOMAIN || "test.example.com";
+process.env.SERVER_DOMAIN = "test.example.com"; // unconditional: the dev .env sets a real zone, and specs share one process
 process.env.REDIS_URL = process.env.REDIS_URL || "redis://localhost:6379";
 
 let initialized = false;

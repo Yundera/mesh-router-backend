@@ -19,8 +19,8 @@ import * as pdns from "../services/PowerDns.js";
  *     npx mocha dist/tests/dns-zones.spec.js
  */
 
-process.env.SERVER_DOMAIN = process.env.SERVER_DOMAIN || "test.example.com";
-process.env.DNS_IP_ZONE = process.env.DNS_IP_ZONE || "ip.test.example.com";
+process.env.SERVER_DOMAIN = "test.example.com"; // unconditional: the dev .env sets a real zone, and specs share one process
+process.env.DNS_IP_ZONE = "ip.test.example.com";
 
 function agent(ip: string, extra: Partial<Route> = {}): Route {
   return { ip, port: 443, priority: 1, source: "agent", ...extra };

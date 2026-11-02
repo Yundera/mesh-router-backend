@@ -10,7 +10,7 @@ import forge from "node-forge";
 const caDir = fs.mkdtempSync(path.join(os.tmpdir(), "mesh-ca-test-"));
 process.env.CA_CERT_PATH = path.join(caDir, "ca-cert.pem");
 process.env.CA_KEY_PATH = path.join(caDir, "ca-key.pem");
-process.env.SERVER_DOMAIN = "inojob.com";
+process.env.SERVER_DOMAIN = "test.example.com"; // same value as every other spec: mocha loads them all into one process first
 
 import { getCertExtraSans } from "../configuration/config.js";
 
