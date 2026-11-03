@@ -296,6 +296,57 @@ export async function signCSR(
   };
 }
 
+// Gateway certificates (handoff between gateways): 30 days, renewed by the gateway itself
+const GATEWAY_CERT_VALIDITY_DAYS = parseInt(process.env.GATEWAY_CERT_VALIDITY_DAYS || '30', 10);
+
+/** The name a gateway's mesh certificate carries: <ip-dashed>.gw.<zone> (`gw` is reserved). */
+export function gatewayCertName(ip: string, zone: string): string {
+  return `${ip.replace(/\./g, '-')}.gw.${zone.toLowerCase()}`;
+}
+
+/**
+ * Sign a gateway's CSR (docs/multi-gateway.md, "Handoff"): the gateway another gateway
+ * hands a request to presents it, and the sender verifies it against the mesh CA and
+ * <ip-dashed>.gw.<zone>, a name no box certificate can carry (`gw` is a reserved label).
+ * The CSR only gives the key: subject and names come from here. Server auth only.
+ */
+export async function signGatewayCSR(csrPem: string, ip: string, name: string): Promise<{ certificate: string; expiresAt: Date }> {
+  if (!caCert || !caKey) {
+    throw new Error('Certificate Authority not initialized');
+  }
+  let csr: ReturnType<typeof forge.pki.certificationRequestFromPem>;
+  try {
+    csr = forge.pki.certificationRequestFromPem(csrPem);
+  } catch (error) {
+    throw new Error('Invalid CSR format (RSA keys only)');
+  }
+  if (!csr.verify()) {
+    throw new Error('CSR signature verification failed');
+  }
+
+  const cert = forge.pki.createCertificate();
+  cert.publicKey = csr.publicKey as forge.pki.PublicKey;
+  cert.serialNumber = '00' + forge.util.bytesToHex(forge.random.getBytesSync(15));
+  const now = new Date();
+  const expiresAt = new Date(now.getTime() + GATEWAY_CERT_VALIDITY_DAYS * 24 * 60 * 60 * 1000);
+  cert.validity.notBefore = now;
+  cert.validity.notAfter = expiresAt;
+  cert.setSubject([{ name: 'commonName', value: name }]);
+  cert.setIssuer(caCert.subject.attributes);
+  cert.setExtensions([
+    { name: 'basicConstraints', cA: false },
+    { name: 'keyUsage', digitalSignature: true, keyEncipherment: true },
+    { name: 'extKeyUsage', serverAuth: true },
+    { name: 'subjectKeyIdentifier' },
+    { name: 'authorityKeyIdentifier', issuer: caCert },
+    { name: 'subjectAltName', altNames: [{ type: 2, value: name }, { type: 7, ip }] },
+  ]);
+  cert.sign(caKey, forge.md.sha256.create());
+
+  console.log(`[CA] Gateway certificate issued for ${name}, expires ${expiresAt.toISOString()}`);
+  return { certificate: forge.pki.certificateToPem(cert), expiresAt };
+}
+
 /**
  * Check if the CA is initialized
  */

@@ -2,10 +2,11 @@ import express, { Request } from "express";
 import {verifySignature} from "../library/KeyLib.js";
 import {authenticate, authenticateService, AuthUserRequest} from "./ExpressAuthenticateMiddleWare.js";
 import {checkDomainAvailability, deleteUserDomain, getUserDomain, updateUserDomain, checkOnlineStatus, getDomain, updateLastRouteRegistration, getAllUserDomains} from "./Domain.js";
-import {getServerDomain, getInactiveDomainDays, getDnsIpZone, getDnsGatewayIps, getTunnelProviders, getInboundMailConfig, getMailConfirmBase} from "../configuration/config.js";
+import {getServerDomain, getInactiveDomainDays, getDnsIpZone, getDnsGatewayIps, getTunnelProviders, getInboundMailConfig, getMailConfirmBase, getGatewayCertToken} from "../configuration/config.js";
 import {registerRoutes, getRoutes, deleteRoutes, Route, getRoutesTTL, getActiveUserIds, getActivityTimestamp} from "./Routes.js";
 import {validateRoutes, normalizeRoute} from "./RouteValidator.js";
-import {getCACertificate, signCSR, isCAInitialized} from "./CertificateAuthority.js";
+import {getCACertificate, signCSR, isCAInitialized, signGatewayCSR, gatewayCertName} from "./CertificateAuthority.js";
+import {gatewayRoutes} from "./GatewayHealth.js";
 import {logDomainAssigned} from "./DomainLogger.js";
 import {runCleanup} from "./DomainCleanup.js";
 import {probeCandidates, checkRateLimit, PROBE_LIMITS} from "./Probe.js";
@@ -505,11 +506,16 @@ export function routerAPI(expressApp: express.Application, checkRoutes = validat
       // the box takes a PROXY v2 header from the gateway (passthrough keeps the client IP)
       const proxyProtocol = await acceptsProxyProtocol(domainData.uid);
 
+      // Several gateways: each tunnel route names the gateway that reaches it, routes of a
+      // dead provider dropped, and the gateway list (whose handoff headers to trust)
+      const gatewayIps = getDnsGatewayIps();
+
       return res.status(200).json({
         userId: domainData.uid,
         domainName: domainData.domain.domainName,
         serverDomain: getServerDomain(),
-        routes: routes || [],  // Empty array if no routes registered
+        routes: gatewayRoutes(routes || []),  // Empty array if no routes registered
+        ...(gatewayIps.length > 1 ? { gatewayIps } : {}),
         routesTtl,  // Seconds until routes expire (-2 if no routes)
         lastSeenOnline: domainData.domain.lastRouteRegistration || null,  // Updated on route registration
         ...(proxyProtocol ? { proxyProtocol: true } : {}),
@@ -1032,6 +1038,46 @@ export function routerAPI(expressApp: express.Application, checkRoutes = validat
         return res.status(400).json({ error: error.message });
       }
 
+      return res.status(500).json({ error: error.toString() });
+    }
+  });
+
+  /**
+   * POST /gateway-cert/:ip
+   * Signs a gateway's mesh certificate for the handoff between gateways
+   * (docs/multi-gateway.md, "Handoff"). Body: the CSR in PEM (text/plain, RSA key).
+   * `Authorization: Bearer <GATEWAY_CERT_TOKEN>`; :ip must be one of DNS_GATEWAY_IPS.
+   * Answers the certificate in PEM (text/plain), named <ip-dashed>.gw.<zone> with an IP SAN.
+   */
+  router.post('/gateway-cert/:ip', express.text({ type: '*/*', limit: '16kb' }), async (req, res) => {
+    const token = getGatewayCertToken();
+    if (!token) {
+      return res.status(503).json({ error: "Gateway certificates not configured (GATEWAY_CERT_TOKEN)" });
+    }
+    if (!tokenMatches(req.headers.authorization ?? "", `Bearer ${token}`)) {
+      logAuthFailure(req, 'invalid_gateway_cert_token', { endpoint: 'gateway_cert' });
+      return res.status(401).json({ error: "Unauthorized" });
+    }
+    const ip = req.params.ip;
+    if (!getDnsGatewayIps().includes(ip)) {
+      return res.status(403).json({ error: `${ip} is not a gateway (DNS_GATEWAY_IPS)` });
+    }
+    if (!isCAInitialized()) {
+      return res.status(503).json({ error: "Certificate Authority not initialized" });
+    }
+    const csr = typeof req.body === "string" ? req.body : "";
+    if (!csr.includes("BEGIN CERTIFICATE REQUEST")) {
+      return res.status(400).json({ error: "CSR (PEM) is required as the request body" });
+    }
+    try {
+      const { certificate } = await signGatewayCSR(csr, ip, gatewayCertName(ip, getServerDomain()));
+      res.setHeader('Content-Type', 'text/plain');
+      return res.status(200).send(certificate);
+    } catch (error) {
+      if (/CSR/.test(error.message ?? "")) {
+        return res.status(400).json({ error: error.message });
+      }
+      console.error("Error in POST /gateway-cert/:ip", error);
       return res.status(500).json({ error: error.toString() });
     }
   });

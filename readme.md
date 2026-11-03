@@ -80,6 +80,7 @@ Response includes both accepted and rejected routes:
 |--------|----------|------|-------------|
 | GET | `/ca-cert` | Public | Get CA public certificate (PEM format) |
 | POST | `/cert/:userid/:sig` | Ed25519 Signature | Sign a CSR and get certificate (hop name + optional IP SAN) |
+| POST | `/gateway-cert/:ip` | GATEWAY_CERT_TOKEN | Sign a gateway's CSR (PEM body, RSA): `<ip-dashed>.gw.<zone>` + IP SAN, for the handoff between gateways; `:ip` must be in `DNS_GATEWAY_IPS` |
 
 ### Example Usage
 
@@ -140,6 +141,8 @@ pnpm install
 | `CA_CERT_PATH` | No | Path to CA certificate for PKI (default: `config/ca-cert.pem`) |
 | `CA_KEY_PATH` | No | Path to CA private key for PKI (default: `config/ca-key.pem`) |
 | `CERT_VALIDITY_HOURS` | No | Certificate validity in hours (default: 72) |
+| `GATEWAY_CERT_TOKEN` | No | Token the gateways present on `POST /gateway-cert/:ip` for their mesh certificate (handoff between gateways); unset = endpoint closed (503) |
+| `GATEWAY_CERT_VALIDITY_DAYS` | No | Gateway certificate validity in days (default: 30) |
 | `CERT_EXTRA_SANS` | No | Extra DNS SANs on every box certificate, comma-separated (e.g. `*.ip.inojob.com` for the ip.<zone> nameserver). Default: none |
 | `INACTIVE_DOMAIN_DAYS` | No | Days of inactivity before domain cleanup (default: 30) |
 | `DOMAIN_LOG_PATH` | No | Path for domain event audit log (default: `logs/domain-events.log`) |

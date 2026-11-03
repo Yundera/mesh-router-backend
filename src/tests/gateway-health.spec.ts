@@ -2,7 +2,8 @@ import { describe, it } from "mocha";
 import { expect } from "chai";
 import * as net from "net";
 import * as http from "http";
-import { checkGateway, checkProvider, GatewayState, inSubnet, nextState, pickForBox, pickHealthy } from "../services/GatewayHealth.js";
+import { checkGateway, checkProvider, GatewayState, inSubnet, nextState, pickForBox, pickHealthy, routesForGateways } from "../services/GatewayHealth.js";
+import { gatewayCertName } from "../services/CertificateAuthority.js";
 
 /** Gateway health: FALL/RISE hysteresis, fail-open answer set, the handshake check. */
 
@@ -100,5 +101,32 @@ describe("Gateway health", () => {
       server.close();
     }
     expect(await checkProvider(`http://127.0.0.1:${port}`)).to.be.a("string");
+  });
+  describe("routes handed to the gateways (handoff)", () => {
+    const G1 = "192.0.2.10", G2 = "192.0.2.11";
+    const tunnels = [{ ip: G1, subnet: "10.78.0.0/16" }, { ip: G2, subnet: "10.79.0.0/16" }];
+    const agent = { source: "agent", ip: "203.0.113.5" };
+    const t1 = { source: "tunnel", ip: "172.30.0.3", tunnelIp: "10.78.0.4" };
+    const t2 = { source: "tunnel", ip: "172.31.0.3", tunnelIp: "10.79.0.7" };
+    const legacy = { source: "tunnel", ip: "172.30.0.3" };
+
+    it("tags each tunnel route with the gateway whose subnet holds it", () => {
+      const out = routesForGateways([agent, t1, t2, legacy], tunnels, () => true);
+      expect(out.map((r) => r.gateway)).to.deep.equal([undefined, G1, G2, undefined]);
+    });
+
+    it("drops the routes of a dead provider, but never all tagged ones", () => {
+      expect(routesForGateways([t1, t2], tunnels, (ip) => ip !== G2).map((r) => r.gateway)).to.deep.equal([G1]);
+      expect(routesForGateways([agent, t2], tunnels, (ip) => ip !== G2).map((r) => r.gateway)).to.deep.equal([undefined, G2]);
+      expect(routesForGateways([t1, t2], tunnels, () => false)).to.have.length(2);
+    });
+
+    it("changes nothing without a tunnel mapping", () => {
+      expect(routesForGateways([agent, t1], [], () => false)).to.deep.equal([agent, t1]);
+    });
+
+    it("names a gateway certificate under the reserved gw label", () => {
+      expect(gatewayCertName("51.15.79.231", "InoJob.com")).to.equal("51-15-79-231.gw.inojob.com");
+    });
   });
 });

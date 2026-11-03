@@ -224,6 +224,15 @@ export function getDnsGatewayTunnels(): GatewayTunnel[] {
 }
 
 /**
+ * Returns the token the gateways present to get their mesh certificate
+ * (POST /gateway-cert/:ip), from GATEWAY_CERT_TOKEN. Empty when unset: the endpoint is
+ * closed (503) and gateways hand nothing to each other.
+ */
+export function getGatewayCertToken(): string {
+  return (process.env.GATEWAY_CERT_TOKEN || "").trim();
+}
+
+/**
  * Returns the tunnel providers boxes connect to, from TUNNEL_PROVIDERS (comma-separated
  * base URLs of each provider's registration API, e.g. https://51.15.79.231:8444). A box
  * always keeps the provider in its own PROVIDER string and adds these. Empty when unset.

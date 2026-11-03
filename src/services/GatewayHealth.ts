@@ -126,6 +126,42 @@ export function boxGatewayIps(publicIp: string | null, tunnelIps: string[]): str
   return pickForBox(healthy, getDnsGatewayTunnels(), (ip) => tunnelStateOf(ip).up, tunnelIps);
 }
 
+/** A route as /resolve/v2 hands it to the gateways (the fields this file reads or adds). */
+export interface GatewayRoute {
+  source: string;
+  tunnelIp?: string;
+  /** the gateway whose local provider holds tunnelIp (added for the gateways' handoff) */
+  gateway?: string;
+}
+
+/**
+ * The routes as the gateways get them (/resolve/v2), for the handoff between gateways
+ * (docs/multi-gateway.md, "Handoff"): each tunnel route is tagged with the gateway whose
+ * provider holds its tunnelIp, so a gateway that cannot reach the box itself knows which
+ * gateway can; and a tunnel route through a provider that is down is dropped, so that
+ * provider's gateway hands the request over instead of trying a dead tunnel. When every
+ * tagged tunnel route would go, none is dropped (a wrong probe must never leave the box
+ * unreachable, the same fail-open as the answers). Pure.
+ */
+export function routesForGateways<T extends GatewayRoute>(
+  routes: T[], tunnels: GatewayTunnel[], tunnelUp: (ip: string) => boolean,
+): (T & { gateway?: string })[] {
+  if (!tunnels.length) return routes;
+  const tagged: (T & { gateway?: string })[] = routes.map((r) => {
+    if (r.source !== "tunnel" || typeof r.tunnelIp !== "string") return r;
+    const t = tunnels.find((tun) => inSubnet(r.tunnelIp as string, tun.subnet));
+    return t ? { ...r, gateway: t.ip } : r;
+  });
+  const kept = tagged.filter((r) => !r.gateway || tunnelUp(r.gateway));
+  const taggedLeft = kept.some((r) => r.gateway);
+  return taggedLeft || !tagged.some((r) => r.gateway) ? kept : tagged;
+}
+
+/** routesForGateways with the configured tunnels and the providers' current health. */
+export function gatewayRoutes<T extends GatewayRoute>(routes: T[]): (T & { gateway?: string })[] {
+  return routesForGateways(routes, getDnsGatewayTunnels(), (ip) => tunnelStateOf(ip).up);
+}
+
 /** Every configured gateway with its state (and its provider's), for /dns/health and logs. */
 export function gatewayStates(): GatewayState[] {
   const withUrl = new Set(getDnsGatewayTunnels().filter((t) => t.providerUrl).map((t) => t.ip));
