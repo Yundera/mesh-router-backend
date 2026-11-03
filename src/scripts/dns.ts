@@ -1,7 +1,8 @@
 /**
  * mesh-cli dns <subcommand>   (flags go after the positional arguments)
  *
- *   dns status <user> [--json] [--ns <ip,…>]   zone state, delegation check, probe, answer, SOA per NS
+ *   dns status <user> [--json] [--ns <ip,…>]   zone state, delegation check (resolvers + the parent's own
+ *                                              servers), probe, answer, SOA per NS
  *   dns force <user> [--host <h>] auto|gateway|direct [--yes]
  *   dns probe <user>                           probe the box now
  *   dns acme <user>                            live DNS-01 challenge values and the update counter
@@ -36,6 +37,8 @@ import {
   LIVE_DOWNGRADE_CHECKS,
   loadApexRRsets,
   lookupDelegation,
+  lookupParentDelegation,
+  missingFromParent,
   delegatesToUs,
   dropUserZone,
   probeUser,
@@ -103,11 +106,17 @@ async function status(label: string | undefined, argv: string[]): Promise<void> 
   const user: ScopeUser = { uid, label: data.domainName, dns: data.dns };
   const view = await viewUser(user);
 
-  const [primary, seen, misses] = await Promise.all([getZone(view.zone), lookupDelegation(data.domainName), liveMisses(data.domainName)]);
+  const [primary, seen, misses, parentNs] = await Promise.all([
+    getZone(view.zone), lookupDelegation(data.domainName), liveMisses(data.domainName), lookupParentDelegation(data.domainName),
+  ]);
   const live = isInScope(data);
   const delegation = seen === null ? "(no conclusive answer from the public resolvers)"
     : seen.length === 0 ? "none in the parent zone"
     : `${seen.join(", ")}${delegatesToUs(seen, getDnsNsHosts()) ? "" : "   (not ours)"}`;
+  const parentMissing = parentNs ? missingFromParent(parentNs, getDnsNsHosts()) : [];
+  const parent = parentNs === null ? "(no conclusive answer from the parent zone's servers)"
+    : parentNs.length === 0 ? "none"
+    : `${parentNs.join(", ")}${parentMissing.length ? `   MISSING ${parentMissing.join(", ")}: no backup if ${parentNs.join(", ")} is down` : ""}`;
   const servers: { name: string; ip: string }[] = [];
   for (const host of getDnsNsHosts()) {
     try {
@@ -122,7 +131,7 @@ async function status(label: string | undefined, argv: string[]): Promise<void> 
   if (hasFlag(argv, "json")) {
     console.log(JSON.stringify({
       user: data.domainName, uid, live, zone: primary ? (live ? "live" : "dormant") : "missing",
-      delegation: seen, liveMisses: misses, settings: data.dns ?? {},
+      delegation: seen, parentDelegation: parentNs, parentMissing, liveMisses: misses, settings: data.dns ?? {},
       ...view, primarySerial: primary?.serial ?? null, nameservers: serials,
     }, null, 2));
     return;
@@ -132,6 +141,8 @@ async function status(label: string | undefined, argv: string[]): Promise<void> 
   console.log(`${view.zone}   (uid ${uid})\n`);
   console.log(`zone           ${!primary ? "missing (created on the box's next route registration)" : live ? "live" : "dormant (gateway answer, nobody asks it)"}`);
   console.log(`delegation     ${delegation}${live && misses ? `   ${misses}/${LIVE_DOWNGRADE_CHECKS} misses before dormant` : ""}`);
+  console.log(`parent NS      ${parent}`);
+  if (parentMissing.length && parentNs?.length) console.log(`               add in the parent zone: ${parentMissing.map((h) => `${view.zone}. NS ${h}.`).join("  ")}`);
   if (!live && seen && delegatesToUs(seen, getDnsNsHosts())) console.log(`               delegated to us: goes live at the box's next route registration (checked at most every 10 min)`);
   else if (!live) console.log(`               to go live, the parent zone needs: ${getDnsNsHosts().map((h) => `${view.zone}. NS ${h}.`).join("  ")} (one is enough)`);
   console.log(`force          ${data.dns?.force ?? "auto"}${Object.keys(data.dns?.hostForce ?? {}).length ? `   hosts: ${Object.entries(data.dns?.hostForce ?? {}).map(([h, f]) => `${h}=${f}`).join(" ")}` : ""}`);

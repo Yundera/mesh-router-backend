@@ -8,6 +8,7 @@ import {routerAPI} from "./services/RouterAPI.js";
 import {runCleanup} from "./services/DomainCleanup.js";
 import {getCleanupCronSchedule} from "./configuration/config.js";
 import {startDnsReconciler} from "./services/DnsZones.js";
+import {startDnsHealthWatch} from "./services/DnsHealth.js";
 
 import 'dotenv/config';
 
@@ -36,6 +37,8 @@ expressApp.listen(port, async () => {
 
     // Nameserver hidden primary (off unless PDNS_API_URL and DNS_IP_ZONE are set)
     startDnsReconciler();
+    // nameserver health in the background: re-NOTIFY a secondary that fell behind
+    startDnsHealthWatch();
 
     console.log('Listening on ' + port);
 });

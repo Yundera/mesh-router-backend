@@ -1,6 +1,6 @@
 import { promises as dnsp } from "dns";
 import { getDnsCatalogZone, getDnsIpZone, getDnsNsHosts, getServerDomain } from "../configuration/config.js";
-import { isDnsEnabled, isUserZonesEnabled, liveUsers } from "./DnsZones.js";
+import { isDnsEnabled, isUserZonesEnabled, liveUsers, missingFromParent, storedParentDelegation } from "./DnsZones.js";
 import * as pdns from "./PowerDns.js";
 import { GatewayState, gatewayStates } from "./GatewayHealth.js";
 
@@ -23,6 +23,15 @@ import { GatewayState, gatewayStates } from "./GatewayHealth.js";
  *             the primary unreachable, or a gateway down (GatewayHealth.ts)
  *   down      no nameserver answers ip.<zone> → 503
  *   off       no nameserver configured       → 200
+ *
+ * Catch-up: a zone a nameserver is still off the primary's serial on RENOTIFY_AFTER_MS after
+ * the change (or with no recent change at all) gets its NOTIFY again. A secondary that was
+ * down missed the first one, and PowerDNS does not re-check its zones at start, so without
+ * this it would serve the old copy until its SOA refresh (2026-11-03 drill, #948).
+ *
+ * Delegation: a live user whose parent NS set (the parent zone's own referral, kept by the
+ * live check) leaves out one of DNS_NS_HOSTS is a problem: resolvers fall back on that
+ * referral, so the nameservers it omits are no backup for that user. Counted, not named.
  *
  * Dormant user zones (one per box, asked by nobody) are counted, not sampled: the check
  * stays the same size whatever the fleet. Public: user zones are counted, never named
@@ -49,13 +58,14 @@ export interface NameserverHealth {
 export interface DnsHealth {
   status: DnsHealthStatus;
   checkedAt: string;
-  primary: { reachable: boolean; zones: number; dormantUserZones?: number };
+  primary: { reachable: boolean; zones: number; dormantUserZones?: number; partialDelegations?: number };
   nameservers: NameserverHealth[];
   gateways: { ip: string; up: boolean; lastError?: string; changedAt?: string; tunnel?: { up: boolean; lastError?: string; changedAt?: string } }[];
   problems: string[];
 }
 
 const LAG_GRACE_MS = 5 * 60 * 1000;
+const RENOTIFY_AFTER_MS = 60 * 1000;
 const CACHE_MS = 60 * 1000;
 const QUERY_TIMEOUT_MS = 2000;
 
@@ -106,6 +116,22 @@ export interface ServerSample {
   zones: ZoneSample[];
 }
 
+/**
+ * The zones to NOTIFY again: some answering nameserver is off the primary's serial, and the
+ * primary's last change to the zone is RENOTIFY_AFTER_MS old or unknown. Pure.
+ */
+export function zonesToRenotify(servers: ServerSample[], now: number): string[] {
+  const out = new Set<string>();
+  for (const s of servers) {
+    if (!s.ip || !s.answers) continue;
+    for (const z of s.zones) {
+      if (z.theirs === z.primary) continue;
+      if (z.changedAt === null || now - z.changedAt >= RENOTIFY_AFTER_MS) out.add(z.zone);
+    }
+  }
+  return [...out];
+}
+
 /** The verdict from one round of samples. Pure. */
 export function evaluate(
   servers: ServerSample[],
@@ -113,6 +139,7 @@ export function evaluate(
   primaryZones: number,
   now: number,
   gateways: GatewayState[] = [],
+  partialDelegations = 0,
 ): DnsHealth {
   const problems: string[] = [];
   const nameservers = servers.map((s): NameserverHealth => {
@@ -147,6 +174,9 @@ export function evaluate(
     return out;
   });
   if (!primaryReachable) problems.push("hidden primary unreachable: serials not compared");
+  if (partialDelegations) {
+    problems.push(`${partialDelegations} live user zone(s): the parent delegates to only part of the nameservers`);
+  }
   for (const g of gateways) {
     if (!g.up) problems.push(`gateway ${g.ip} down since ${g.changedAt ?? "?"}: ${g.lastError ?? "?"} (out of the answers)`);
     if (g.tunnel && !g.tunnel.up) {
@@ -165,7 +195,7 @@ export function evaluate(
   return {
     status,
     checkedAt: new Date(now).toISOString(),
-    primary: { reachable: primaryReachable, zones: primaryZones },
+    primary: { reachable: primaryReachable, zones: primaryZones, ...(partialDelegations ? { partialDelegations } : {}) },
     nameservers,
     gateways: gateways.map(({ ip, up, lastError, changedAt, tunnel }) => ({
       ip, up, lastError, changedAt,
@@ -184,6 +214,7 @@ async function check(): Promise<DnsHealth> {
   let primaryReachable = false;
   let expected: { zone: string; user: boolean; serial: number }[] = [];
   let dormant = 0;
+  let partialDelegations = 0;
   if (primaryConfigured) {
     try {
       const members = (await pdns.listZones())
@@ -198,6 +229,11 @@ async function check(): Promise<DnsHealth> {
       const isDormant = (zone: string) => zone.endsWith(suffix) && /^[a-z0-9-]+$/.test(zone.slice(0, -suffix.length))
         && !live.has(zone.slice(0, -suffix.length));
       expected = members.filter((z) => !(z.user && isDormant(z.zone)));
+      const nsHosts = getDnsNsHosts();
+      for (const label of live) {
+        const parentNs = await storedParentDelegation(label).catch(() => null);
+        if (parentNs && parentNs.length && missingFromParent(parentNs, nsHosts).length) partialDelegations++;
+      }
       dormant = members.length - expected.length;
       primaryReachable = true;
     } catch (e) {
@@ -231,7 +267,18 @@ async function check(): Promise<DnsHealth> {
       servers.push({ host, ip, answers, zones });
     }
   }
-  const health = evaluate(servers, primaryReachable || !primaryConfigured, expected.length, Date.now(), gatewayStates());
+  const now = Date.now();
+  if (primaryReachable) {
+    for (const zone of zonesToRenotify(servers, now)) {
+      try {
+        await pdns.notifyZone(zone);
+        console.log(`[dns-health] ${zone}: a nameserver is still off the primary's serial, NOTIFY sent again`);
+      } catch (e) {
+        console.warn(`[dns-health] ${zone}: NOTIFY failed: ${(e as Error).message ?? e}`);
+      }
+    }
+  }
+  const health = evaluate(servers, primaryReachable || !primaryConfigured, expected.length, now, gatewayStates(), partialDelegations);
   if (dormant) health.primary.dormantUserZones = dormant;
   if (health.problems.length) console.warn(`[dns-health] ${health.status}: ${health.problems.join("; ")}`);
   return health;
@@ -251,4 +298,27 @@ export async function getDnsHealth(): Promise<DnsHealth> {
       });
   }
   return running;
+}
+
+/**
+ * Run the check in the background every WATCH_INTERVAL_MS, so the catch-up NOTIFYs and the
+ * log lines do not wait for the external monitor to ask (it may poll rarely, or not at all
+ * on staging). Off without a nameserver setup.
+ */
+const WATCH_INTERVAL_MS = 2 * 60 * 1000;
+let watch: NodeJS.Timeout | null = null;
+
+export function startDnsHealthWatch(): void {
+  if (watch || !(isDnsEnabled() || isUserZonesEnabled())) return;
+  watch = setInterval(() => {
+    getDnsHealth().catch((e) => console.error(`[dns-health] watch: ${(e as Error).message ?? e}`));
+  }, WATCH_INTERVAL_MS);
+  watch.unref();
+}
+
+export function stopDnsHealthWatch(): void {
+  if (watch) {
+    clearInterval(watch);
+    watch = null;
+  }
 }

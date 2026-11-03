@@ -21,6 +21,7 @@ import { getAcmeTxt } from "./AcmeDns.js";
 import { boxGatewayIps, healthyGatewayIps, startGatewayHealth, stopGatewayHealth } from "./GatewayHealth.js";
 import * as pdns from "./PowerDns.js";
 import { parseZoneFile, ZoneFileError, ZoneRecord } from "./ZoneFile.js";
+import { queryNs } from "./DnsWire.js";
 
 /**
  * Backend side of the nameserver (mesh-router-nameserver docs/architecture.md §10):
@@ -738,6 +739,89 @@ export async function checkLive(
   return live;
 }
 
+// --- the parent's own NS set: does it list every nameserver? -----------------
+//
+// The live check asks public resolvers, which return the child zone's own NS set (both
+// nameservers). What a resolver falls back on when one is down is the parent's referral,
+// which may list fewer: then that one nameserver is a single point of failure for the
+// user (2026-11-03 drill, #948). So the parent's own servers are asked as well, at every
+// live check, and the result kept for `mesh-cli dns status` and /dns/health.
+
+function parentNsKey(label: string): string {
+  return `dns:parentns:${label.toLowerCase()}`;
+}
+
+function normHost(h: string): string {
+  return h.toLowerCase().replace(/\.+$/, "");
+}
+
+/** Our nameservers the parent's NS set leaves out. Pure. */
+export function missingFromParent(parentNs: string[], nsHosts: string[]): string[] {
+  const have = new Set(parentNs.map(normHost));
+  return nsHosts.map(normHost).filter((h) => !have.has(h));
+}
+
+/** Addresses of the servers authoritative for SERVER_DOMAIN (the parent of user zones). */
+async function parentServerIps(): Promise<string[]> {
+  const resolver = new dnsp.Resolver({ timeout: 3000, tries: 2 });
+  resolver.setServers(LIVE_RESOLVERS);
+  const ips: string[] = [];
+  for (const host of (await resolver.resolveNs(getServerDomain())).slice(0, 4)) {
+    try {
+      ips.push(...(await resolver.resolve4(host)));
+    } catch {
+      // next one
+    }
+  }
+  return ips;
+}
+
+/**
+ * The NS set of <label>.<zone> as the parent zone's own servers give it (their referral):
+ * the first conclusive answer of up to three of them; null when none is conclusive.
+ * `query` for the tests.
+ */
+export async function lookupParentDelegation(
+  label: string, query: (ip: string, name: string) => Promise<string[] | null> = queryNs,
+): Promise<string[] | null> {
+  let ips: string[];
+  try {
+    ips = await parentServerIps();
+  } catch {
+    return null;
+  }
+  for (const ip of ips.slice(0, 3)) {
+    const ns = await query(ip, userZoneName(label));
+    if (ns !== null) return ns;
+  }
+  return null;
+}
+
+/** Ask the parent now and keep the answer (a conclusive one) as long as the live flag. */
+export async function checkParentDelegation(label: string): Promise<string[] | null> {
+  const ns = await lookupParentDelegation(label);
+  if (ns !== null) {
+    await getRedisClient().setex(parentNsKey(label), LIVE_TTL_SECONDS, JSON.stringify(ns));
+    const missing = missingFromParent(ns, getDnsNsHosts());
+    if (ns.length && missing.length) {
+      console.warn(`[dns] ${label}: the parent delegates to ${ns.join(", ")} only (missing ${missing.join(", ")})`);
+    }
+  }
+  return ns;
+}
+
+/** The parent's NS set from the last live check, null when not known. */
+export async function storedParentDelegation(label: string): Promise<string[] | null> {
+  const raw = await getRedisClient().get(parentNsKey(label));
+  if (!raw) return null;
+  try {
+    const ns = JSON.parse(raw);
+    return Array.isArray(ns) ? ns.map(String) : null;
+  } catch {
+    return null;
+  }
+}
+
 /** True when the live flag is missing or older than LIVE_REFRESH_SECONDS. */
 async function liveDue(label: string): Promise<boolean> {
   const ttl = await getRedisClient().ttl(liveKey(label));
@@ -764,6 +848,9 @@ export async function refreshLive(uid: string, data: NSLRouterData, force = fals
   try {
     const wasLive = !!data.dns?.live;
     const live = await checkLive(label, wasLive);
+    if (live) {
+      await checkParentDelegation(label).catch((e) => console.warn(`[dns] ${label}: parent NS check failed: ${(e as Error).message ?? e}`));
+    }
     if (live === wasLive) return false;
     await setLive(uid, data, live);
     return true;
