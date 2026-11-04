@@ -1,8 +1,8 @@
 import { promises as dnsp } from "dns";
-import { getDnsCatalogZone, getDnsIpZone, getDnsNsHosts, getServerDomain } from "../configuration/config.js";
+import { getDnsCatalogZone, getDnsIpZone, getDnsNsHosts, getGatewayCertMinDays, getServerDomain } from "../configuration/config.js";
 import { isDnsEnabled, isUserZonesEnabled, liveUsers, missingFromParent, storedParentDelegation } from "./DnsZones.js";
 import * as pdns from "./PowerDns.js";
-import { GatewayState, gatewayStates } from "./GatewayHealth.js";
+import { GatewayCert, gatewayCertProblem, GatewayState, gatewayStates } from "./GatewayHealth.js";
 
 /**
  * Health of the public nameservers, for an external monitor (GET /dns/health).
@@ -20,7 +20,9 @@ import { GatewayState, gatewayStates } from "./GatewayHealth.js";
  *
  *   ok        everything in sync             → 200
  *   degraded  a nameserver down or behind,   → 500
- *             the primary unreachable, or a gateway down (GatewayHealth.ts)
+ *             the primary unreachable, a gateway down (GatewayHealth.ts), or
+ *             with DNS_GATEWAY_CERT_MIN_DAYS a gateway whose *.<zone> certificate is
+ *             missing, self-signed or within that many days of expiry
  *   down      no nameserver answers ip.<zone> → 503
  *   off       no nameserver configured       → 200
  *
@@ -60,7 +62,7 @@ export interface DnsHealth {
   checkedAt: string;
   primary: { reachable: boolean; zones: number; dormantUserZones?: number; partialDelegations?: number };
   nameservers: NameserverHealth[];
-  gateways: { ip: string; up: boolean; lastError?: string; changedAt?: string; tunnel?: { up: boolean; lastError?: string; changedAt?: string } }[];
+  gateways: { ip: string; up: boolean; lastError?: string; changedAt?: string; tunnel?: { up: boolean; lastError?: string; changedAt?: string }; cert?: GatewayCert }[];
   problems: string[];
 }
 
@@ -140,6 +142,7 @@ export function evaluate(
   now: number,
   gateways: GatewayState[] = [],
   partialDelegations = 0,
+  certMinDays = 0,
 ): DnsHealth {
   const problems: string[] = [];
   const nameservers = servers.map((s): NameserverHealth => {
@@ -182,6 +185,8 @@ export function evaluate(
     if (g.tunnel && !g.tunnel.up) {
       problems.push(`tunnel provider of gateway ${g.ip} down since ${g.tunnel.changedAt ?? "?"}: ${g.tunnel.lastError ?? "?"} (out of NAT boxes' answers)`);
     }
+    const cert = gatewayCertProblem(g.cert, getServerDomain(), certMinDays, new Date(now));
+    if (cert) problems.push(`gateway ${g.ip}: ${cert}`);
   }
 
   let status: DnsHealthStatus;
@@ -197,9 +202,10 @@ export function evaluate(
     checkedAt: new Date(now).toISOString(),
     primary: { reachable: primaryReachable, zones: primaryZones, ...(partialDelegations ? { partialDelegations } : {}) },
     nameservers,
-    gateways: gateways.map(({ ip, up, lastError, changedAt, tunnel }) => ({
+    gateways: gateways.map(({ ip, up, lastError, changedAt, tunnel, cert }) => ({
       ip, up, lastError, changedAt,
       ...(tunnel ? { tunnel: { up: tunnel.up, lastError: tunnel.lastError, changedAt: tunnel.changedAt } } : {}),
+      ...(cert ? { cert } : {}),
     })),
     problems,
   };
@@ -278,7 +284,7 @@ async function check(): Promise<DnsHealth> {
       }
     }
   }
-  const health = evaluate(servers, primaryReachable || !primaryConfigured, expected.length, now, gatewayStates(), partialDelegations);
+  const health = evaluate(servers, primaryReachable || !primaryConfigured, expected.length, now, gatewayStates(), partialDelegations, getGatewayCertMinDays());
   if (dormant) health.primary.dormantUserZones = dormant;
   if (health.problems.length) console.warn(`[dns-health] ${health.status}: ${health.problems.join("; ")}`);
   return health;

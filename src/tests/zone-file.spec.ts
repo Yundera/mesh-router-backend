@@ -124,6 +124,19 @@ describe("apex zone", () => {
     expect(errorsOf(() => desiredApexRRsets({ ...base, records }))).to.have.length(1);
   });
 
+  it("publishes the gateways' challenge TXT and owns that name even with no order running", () => {
+    const v = (c: string) => c.repeat(43);
+    const records = parseZoneFile(`_acme-challenge TXT "stale"\n@ TXT "v=spf1 -all"`, ZONE);
+    const { rrsets, skipped } = desiredApexRRsets({ ...base, records, acmeTxt: [v("b"), v("a")] });
+    const txt = rrsets.find((r) => r.name === "_acme-challenge.test.example.com." && r.type === "TXT")!;
+    expect(txt.ttl).to.equal(60);
+    expect(txt.records.map((r) => r.content)).to.deep.equal([`"${v("a")}"`, `"${v("b")}"`]);
+    expect(skipped).to.deep.equal(["line 1: _acme-challenge.test.example.com. TXT is set by the backend"]);
+    const none = desiredApexRRsets({ ...base, records }).rrsets;
+    expect(none.some((r) => r.name === "_acme-challenge.test.example.com.")).to.equal(false);
+    expect(none.some((r) => r.name === "test.example.com." && r.type === "TXT")).to.equal(true);
+  });
+
   it("skips the ip.<zone> delegation when the ip zone is elsewhere, and the wildcard without gateways", () => {
     const { rrsets } = desiredApexRRsets({ ...base, records: [], ipZone: "ip.other.org", gatewayIps: [], userZones: [] });
     expect(rrsets.map((r) => `${r.name} ${r.type}`)).to.deep.equal(["test.example.com. NS"]);

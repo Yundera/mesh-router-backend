@@ -7,7 +7,7 @@ import { createTestApp } from "./test-app.js";
 import { createTestUser, deleteTestUser, generateTestUserId, signMessage } from "./test-helpers.js";
 import { NSL_ROUTER_COLLECTION } from "../DataBaseDTO/DataBaseNSLRouter.js";
 import { getRedisClient, closeRedisClient } from "../redis/redisClient.js";
-import { acmeLabelFromFqdn, addAcmeTxt, getAcmeTxt, isAcmeTxtValue } from "../services/AcmeDns.js";
+import { acmeLabelFromFqdn, addAcmeTxt, getAcmeTxt, isAcmeTxtValue, isApexAcmeFqdn } from "../services/AcmeDns.js";
 import { dropUserZone, userZoneName } from "../services/DnsZones.js";
 import * as pdns from "../services/PowerDns.js";
 
@@ -42,6 +42,15 @@ describe("acme-dns input checks", () => {
     expect(acmeLabelFromFqdn(`_acme-challenge.a.${zone}.`)).to.equal(null);
     expect(acmeLabelFromFqdn("_acme-challenge.wisera.other.com.")).to.equal(null);
     expect(acmeLabelFromFqdn(`${zone}.`)).to.equal(null);
+  });
+
+  it("tells the apex challenge (the gateways' *.<zone>) from a user's", () => {
+    const apex = process.env.SERVER_DOMAIN as string;
+    expect(isApexAcmeFqdn(`_acme-challenge.${apex}.`)).to.equal(true);
+    expect(isApexAcmeFqdn(`_ACME-challenge.${apex.toUpperCase()}`)).to.equal(true);
+    expect(isApexAcmeFqdn(`_acme-challenge.wisera.${apex}.`)).to.equal(false);
+    expect(acmeLabelFromFqdn(`_acme-challenge.${apex}.`)).to.equal(null);
+    expect(isApexAcmeFqdn(42)).to.equal(false);
   });
 });
 
@@ -157,6 +166,22 @@ describe("acme-dns API on the PowerDNS primary", function () {
     it("refuses other names and users that are not live", async () => {
       expect((await call("present", { fqdn: `_acme-challenge.x.${fqdn()}`, value: txt("g") })).status).to.equal(400);
       expect((await call("present", { fqdn: `_acme-challenge.${userZoneName(other.uid)}.`, value: txt("g") })).status).to.equal(403);
+    });
+
+    it("lets a gateway credential set the apex challenge only", async () => {
+      const saved = process.env.GATEWAY_CERT_TOKEN;
+      process.env.GATEWAY_CERT_TOKEN = "acme-dns-test-gateway-token";
+      const gw = `Basic ${Buffer.from("192.0.2.10:acme-dns-test-gateway-token").toString("base64")}`;
+      const apex = `_acme-challenge.${process.env.SERVER_DOMAIN}.`;
+      try {
+        expect((await call("present", { fqdn: fqdn(), value: txt("g") }, gw)).status).to.equal(403);
+        // no DNS_STATIC_ZONE_FILE in the tests: the apex zone is not ours
+        expect((await call("present", { fqdn: apex, value: txt("g") }, gw)).status).to.equal(409);
+        expect((await call("present", { fqdn: apex, value: "short" }, gw)).status).to.equal(400);
+      } finally {
+        if (saved === undefined) delete process.env.GATEWAY_CERT_TOKEN;
+        else process.env.GATEWAY_CERT_TOKEN = saved;
+      }
     });
   });
 

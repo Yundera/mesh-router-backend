@@ -24,6 +24,11 @@ import { getDnsGatewayIps, getDnsGatewayTunnels, getServerDomain, GatewayTunnel 
  * A dead provider only takes its gateway out of NAT boxes' answers: the gateway still
  * reaches boxes with a public IP.
  *
+ * The same handshake reads the certificate the gateway presents for the names it
+ * terminates: its public *.<zone> (phase-1.1-gateway-tls.md §6.1) or the self-signed
+ * fallback. Kept on the state for /dns/health (gatewayCertProblem), never verified here:
+ * a bad certificate never takes a gateway out of the answers.
+ *
  * In memory: one backend, and a restart starts from "all up", the safe side.
  */
 
@@ -31,6 +36,15 @@ const INTERVAL_MS = 15_000;
 const TIMEOUT_MS = 5_000;
 const FALL = 2;
 const RISE = 2;
+
+/** What a gateway presented on the last handshake that completed. */
+export interface GatewayCert {
+  notAfter: string;
+  issuer: string;
+  /** subjectAltName DNS names */
+  names: string[];
+  selfSigned: boolean;
+}
 
 export interface GatewayState {
   ip: string;
@@ -42,6 +56,8 @@ export interface GatewayState {
   changedAt?: string;
   /** the gateway's local tunnel provider, when DNS_GATEWAY_TUNNELS gives its URL */
   tunnel?: GatewayState;
+  /** the certificate it presented on the last completed handshake */
+  cert?: GatewayCert;
 }
 
 const states = new Map<string, GatewayState>();
@@ -168,18 +184,64 @@ export function gatewayStates(): GatewayState[] {
   return getDnsGatewayIps().map((ip) => ({ ...stateOf(ip), ...(withUrl.has(ip) ? { tunnel: tunnelStateOf(ip) } : {}) }));
 }
 
-/** One TLS handshake; resolves with the error, or undefined when it completed. */
-export function checkGateway(ip: string, port = 443, servername = `gateway.entrypoint.${getServerDomain()}`): Promise<string | undefined> {
+/** The fields of a peer certificate this file keeps. Pure. */
+export function toGatewayCert(peer: tls.PeerCertificate | undefined): GatewayCert | undefined {
+  if (!peer || !peer.valid_to) return undefined;
+  const dn = (d: unknown) => {
+    const o = (d ?? {}) as Record<string, unknown>;
+    return [o.O, o.CN].filter((v) => typeof v === "string" && v).join(", ");
+  };
+  const names = (peer.subjectaltname || "").split(",").map((s) => s.trim())
+    .filter((s) => s.startsWith("DNS:")).map((s) => s.slice(4).toLowerCase());
+  const issuer = dn(peer.issuer);
+  return {
+    notAfter: new Date(peer.valid_to).toISOString(),
+    issuer,
+    names,
+    selfSigned: issuer === dn(peer.subject) && JSON.stringify(peer.issuer) === JSON.stringify(peer.subject),
+  };
+}
+
+/** One TLS handshake: the error (undefined when it completed) and the certificate seen. */
+export function checkGatewayTls(ip: string, port = 443, servername = `gateway.entrypoint.${getServerDomain()}`): Promise<{ error?: string; cert?: GatewayCert }> {
   return new Promise((resolve) => {
     const socket = tls.connect({ host: ip, port, servername, rejectUnauthorized: false, timeout: TIMEOUT_MS });
-    const done = (error?: string) => {
+    const done = (error?: string, cert?: GatewayCert) => {
       socket.destroy();
-      resolve(error);
+      resolve({ error, cert });
     };
-    socket.once("secureConnect", () => done());
+    socket.once("secureConnect", () => {
+      let cert: GatewayCert | undefined;
+      try {
+        cert = toGatewayCert(socket.getPeerCertificate());
+      } catch {
+        cert = undefined;
+      }
+      done(undefined, cert);
+    });
     socket.once("timeout", () => done("timeout"));
     socket.once("error", (err) => done(err.message));
   });
+}
+
+/** One TLS handshake; resolves with the error, or undefined when it completed. */
+export async function checkGateway(ip: string, port = 443, servername = `gateway.entrypoint.${getServerDomain()}`): Promise<string | undefined> {
+  return (await checkGatewayTls(ip, port, servername)).error;
+}
+
+/**
+ * Why a gateway's certificate is a problem for /dns/health, or null: judged only when
+ * `minDays` > 0 (DNS_GATEWAY_CERT_MIN_DAYS). It must be a CA's (not the self-signed
+ * fallback), name *.<zone>, and stay valid for more than `minDays`. Pure.
+ */
+export function gatewayCertProblem(cert: GatewayCert | undefined, zone: string, minDays: number, now: Date): string | null {
+  if (minDays <= 0 || !cert) return null;
+  const wildcard = `*.${zone.toLowerCase()}`;
+  if (cert.selfSigned) return `presents a self-signed certificate (${cert.issuer || "no issuer"}), not *.${zone}`;
+  if (!cert.names.includes(wildcard)) return `certificate does not name ${wildcard} (${cert.names.join(", ") || "no DNS names"})`;
+  const days = (new Date(cert.notAfter).getTime() - now.getTime()) / 86_400_000;
+  if (days < minDays) return `certificate ${wildcard} expires ${cert.notAfter} (${Math.floor(days)} days left, renewal expected at 30)`;
+  return null;
 }
 
 /** GET <url>/api/ping on a tunnel provider (self-signed accepted); the error, or undefined on 200. */
@@ -208,14 +270,21 @@ export async function checkGateways(): Promise<boolean> {
   const tunnels = getDnsGatewayTunnels().filter((t) => t.providerUrl);
   for (const ip of [...states.keys()]) if (!ips.includes(ip)) states.delete(ip);
   for (const ip of [...tunnelStates.keys()]) if (!tunnels.some((t) => t.ip === ip)) tunnelStates.delete(ip);
-  const apply = (map: Map<string, GatewayState>, ip: string, error: string | undefined, what: string) => {
+  const apply = (map: Map<string, GatewayState>, ip: string, error: string | undefined, what: string, cert?: GatewayCert) => {
     const prev = map.get(ip) ?? { ip, up: true, streak: 0 };
     const next = nextState(prev, !error, error, new Date());
+    if (cert) next.cert = cert;
     map.set(ip, next);
     if (next.up !== prev.up) console.log(`[gateways] ${what} ${ip} ${next.up ? "UP" : `DOWN (${error})`}`);
+    if (cert && prev.cert?.notAfter !== cert.notAfter) {
+      console.log(`[gateways] ${what} ${ip} certificate ${cert.selfSigned ? "self-signed" : cert.names.join(",")}, until ${cert.notAfter}${cert.issuer ? ` (${cert.issuer})` : ""}`);
+    }
   };
   await Promise.all([
-    ...ips.map(async (ip) => apply(states, ip, await checkGateway(ip), "gateway")),
+    ...ips.map(async (ip) => {
+      const { error, cert } = await checkGatewayTls(ip);
+      apply(states, ip, error, "gateway", cert);
+    }),
     ...tunnels.map(async (t) => apply(tunnelStates, t.ip, await checkProvider(t.providerUrl!), "tunnel provider of")),
   ]);
   return answerKey() !== before;

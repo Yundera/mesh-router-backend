@@ -2,7 +2,8 @@ import { describe, it } from "mocha";
 import { expect } from "chai";
 import * as net from "net";
 import * as http from "http";
-import { checkGateway, checkProvider, GatewayState, inSubnet, nextState, pickForBox, pickHealthy, routesForGateways } from "../services/GatewayHealth.js";
+import { checkGateway, checkProvider, GatewayCert, gatewayCertProblem, GatewayState, inSubnet, nextState, pickForBox, pickHealthy, routesForGateways, toGatewayCert } from "../services/GatewayHealth.js";
+import type { PeerCertificate } from "tls";
 import { gatewayCertName } from "../services/CertificateAuthority.js";
 
 /** Gateway health: FALL/RISE hysteresis, fail-open answer set, the handshake check. */
@@ -49,6 +50,35 @@ describe("Gateway health", () => {
       server.close();
     }
     expect(await checkGateway("127.0.0.1", port, "gateway.entrypoint.test.example")).to.be.a("string");
+  });
+
+  it("reads the certificate a gateway presents", () => {
+    const le = toGatewayCert({
+      valid_to: "Feb  2 09:28:19 2027 GMT",
+      issuer: { C: "US", O: "Let's Encrypt", CN: "YE1" },
+      subject: { CN: "*.test.example.com" },
+      subjectaltname: "DNS:*.test.example.com",
+    } as unknown as PeerCertificate)!;
+    expect(le).to.deep.equal({ notAfter: "2027-02-02T09:28:19.000Z", issuer: "Let's Encrypt, YE1", names: ["*.test.example.com"], selfSigned: false });
+    const own = toGatewayCert({
+      valid_to: "Oct 30 10:00:00 2036 GMT", issuer: { CN: "mesh-router-gateway" }, subject: { CN: "mesh-router-gateway" },
+    } as unknown as PeerCertificate)!;
+    expect(own.selfSigned).to.equal(true);
+    expect(own.names).to.deep.equal([]);
+    expect(toGatewayCert({} as PeerCertificate)).to.equal(undefined);
+  });
+
+  it("judges the gateway certificate only with a minimum set", () => {
+    const now = new Date("2026-11-04T10:00:00Z");
+    const cert = (over: Partial<GatewayCert>): GatewayCert => ({
+      notAfter: "2027-02-02T09:28:19.000Z", issuer: "Let's Encrypt, YE1", names: ["*.test.example.com"], selfSigned: false, ...over,
+    });
+    expect(gatewayCertProblem(cert({ selfSigned: true }), "test.example.com", 0, now)).to.equal(null);
+    expect(gatewayCertProblem(cert({}), "test.example.com", 14, now)).to.equal(null);
+    expect(gatewayCertProblem(undefined, "test.example.com", 14, now)).to.equal(null);
+    expect(gatewayCertProblem(cert({ selfSigned: true }), "test.example.com", 14, now)).to.match(/self-signed/);
+    expect(gatewayCertProblem(cert({ names: ["*.other.org"] }), "test.example.com", 14, now)).to.match(/does not name \*\.test\.example\.com/);
+    expect(gatewayCertProblem(cert({ notAfter: "2026-11-14T10:00:00.000Z" }), "test.example.com", 14, now)).to.match(/10 days left/);
   });
 
   it("matches tunnel addresses to subnets", () => {

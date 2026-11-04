@@ -228,6 +228,16 @@ export function getDnsGatewayTunnels(): GatewayTunnel[] {
  * (POST /gateway-cert/:ip), from GATEWAY_CERT_TOKEN. Empty when unset: the endpoint is
  * closed (503) and gateways hand nothing to each other.
  */
+/**
+ * Days of validity under which a gateway's public *.<zone> certificate makes /dns/health
+ * degraded (DNS_GATEWAY_CERT_MIN_DAYS). 0 when unset: the certificate is reported, never
+ * judged (a deployment whose gateways still present the self-signed fallback).
+ */
+export function getGatewayCertMinDays(): number {
+  const n = Number(process.env.DNS_GATEWAY_CERT_MIN_DAYS || 0);
+  return Number.isFinite(n) && n > 0 ? n : 0;
+}
+
 export function getGatewayCertToken(): string {
   return (process.env.GATEWAY_CERT_TOKEN || "").trim();
 }

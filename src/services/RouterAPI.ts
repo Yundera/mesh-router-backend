@@ -11,11 +11,11 @@ import {logDomainAssigned} from "./DomainLogger.js";
 import {runCleanup} from "./DomainCleanup.js";
 import {probeCandidates, checkRateLimit, PROBE_LIMITS} from "./Probe.js";
 import {recordUsage, isReportableDate, isValidAppName, MAX_USAGE_EVENTS_PER_REQUEST} from "./Usage.js";
-import {noteRoutes, onRegistration, isUserZonesEnabled, viewUser, isInScope, resyncUser, setForce, setCaaAccounts, isAcmeAccountUri, MAX_CAA_ACCOUNTS} from "./DnsZones.js";
+import {noteRoutes, onRegistration, isUserZonesEnabled, viewUser, isInScope, resyncUser, setForce, setCaaAccounts, isAcmeAccountUri, MAX_CAA_ACCOUNTS, isApexZoneEnabled, syncApex} from "./DnsZones.js";
 import {hopName, acceptsProxyProtocol, setProxyProtocol} from "./HopNames.js";
 import {getDnsHealth, httpStatusFor} from "./DnsHealth.js";
 import {NSLRouterData} from "../DataBaseDTO/DataBaseNSLRouter.js";
-import {acmeLabelFromFqdn, addAcmeTxt, isAcmeTxtValue, removeAcmeTxt, takeAcmeUpdate} from "./AcmeDns.js";
+import {acmeLabelFromFqdn, addAcmeTxt, isAcmeTxtValue, removeAcmeTxt, takeAcmeUpdate, isApexAcmeFqdn, APEX_ACME_LABEL} from "./AcmeDns.js";
 import {verifyEmailCredential, sendUserEmail, EmailError, EmailSendRequest} from "./Email.js";
 import {MAX_INBOUND_BYTES, tokenMatches, readInboundForm, handleInbound, inboundDeps} from "./InboundMail.js";
 import {UserMailError, forwardView, setForward, clearForward, confirmForward, suppressionReason, confirmPage} from "./UserMail.js";
@@ -69,6 +69,33 @@ function authenticateServiceOrBasic(req: Request, res: express.Response, next: e
     if (decoded.slice(decoded.indexOf(':') + 1) === key) return next();
   }
   return authenticateService(req, res, next);
+}
+
+/**
+ * The httpreq routes also take a gateway's GATEWAY_CERT_TOKEN (Basic password, the
+ * gateway's IP as user, or Bearer): that credential may only write the apex challenge
+ * (`res.locals.acmeGateway` set), checked in the handler. Anything else is the service key.
+ */
+function authenticateAcmeHttpreq(req: Request, res: express.Response, next: express.NextFunction) {
+  const header = req.get('Authorization') || '';
+  const token = getGatewayCertToken();
+  if (token) {
+    let secret = "";
+    let user = "";
+    if (header.startsWith('Basic ')) {
+      const decoded = Buffer.from(header.slice(6), 'base64').toString();
+      const colon = decoded.indexOf(':');
+      user = colon >= 0 ? decoded.slice(0, colon) : "";
+      secret = colon >= 0 ? decoded.slice(colon + 1) : decoded;
+    } else if (header.startsWith('Bearer ')) {
+      secret = header.slice(7);
+    }
+    if (secret && tokenMatches(secret, token)) {
+      res.locals.acmeGateway = user || "gateway";
+      return next();
+    }
+  }
+  return authenticateServiceOrBasic(req, res, next);
 }
 
 /*
@@ -1192,13 +1219,37 @@ export function routerAPI(expressApp: express.Application, checkRoutes = validat
 
   /**
    * POST /acme-dns/present, /acme-dns/cleanup
-   * lego's httpreq protocol for the gateway (Traefik): {fqdn, value} with
-   * Authorization: Bearer SERVICE_API_KEY. Only _acme-challenge.<label>.<zone>. of a
-   * live user: the gateway needs certs only for names our nameservers really serve.
+   * lego's httpreq protocol: {fqdn, value}.
+   * - `_acme-challenge.<zone>.`: a gateway's own *.<zone> order (phase-1.1-gateway-tls.md
+   *   §6.1), with GATEWAY_CERT_TOKEN (or the service key). Written to the apex zone,
+   *   which must be ours (DNS_STATIC_ZONE_FILE); several gateways' values coexist.
+   * - `_acme-challenge.<label>.<zone>.` of a live user, with SERVICE_API_KEY only: the
+   *   gateway needs certs only for names our nameservers really serve.
    */
   const httpreq = (action: 'present' | 'cleanup') => async (req: Request, res: express.Response) => {
     const { fqdn, value } = req.body ?? {};
+    const gateway: string | undefined = res.locals.acmeGateway;
     try {
+      if (isApexAcmeFqdn(fqdn)) {
+        if (!isAcmeTxtValue(value)) {
+          return res.status(400).json({ error: "value must be a 43-character DNS-01 challenge value." });
+        }
+        if (!isApexZoneEnabled()) {
+          return res.status(409).json({ error: "The apex zone is not served by our nameservers (DNS_STATIC_ZONE_FILE)." });
+        }
+        if (action === 'present' && !(await takeAcmeUpdate(`gateway:${gateway ?? "service"}`))) {
+          return res.status(429).json({ error: "Too many challenge updates, try again within the hour." });
+        }
+        if (action === 'present') await addAcmeTxt(APEX_ACME_LABEL, value);
+        else await removeAcmeTxt(APEX_ACME_LABEL, value);
+        await syncApex();
+        console.log(`[acme-dns] apex: ${gateway ? `gateway ${gateway}` : "service"} ${action}`);
+        return res.status(200).json({});
+      }
+      if (gateway) {
+        logAuthFailure(req, 'acme_gateway_foreign_name', { fqdn: String(fqdn) });
+        return res.status(403).json({ error: "A gateway credential may only set _acme-challenge.<zone>." });
+      }
       const label = acmeLabelFromFqdn(fqdn);
       if (!label) {
         return res.status(400).json({ error: "fqdn must be _acme-challenge.<user>.<zone>." });
@@ -1220,8 +1271,8 @@ export function routerAPI(expressApp: express.Application, checkRoutes = validat
       return res.status(500).json({ error: error.toString() });
     }
   };
-  router.post('/acme-dns/present', authenticateServiceOrBasic, httpreq('present'));
-  router.post('/acme-dns/cleanup', authenticateServiceOrBasic, httpreq('cleanup'));
+  router.post('/acme-dns/present', authenticateAcmeHttpreq, httpreq('present'));
+  router.post('/acme-dns/cleanup', authenticateAcmeHttpreq, httpreq('cleanup'));
 
   /**
    * GET /dns/health

@@ -17,7 +17,7 @@ import { DnsForce, NSL_ROUTER_COLLECTION, NSLRouterData, NSLRouterDns } from "..
 import { isLanOrReserved } from "./Probe.js";
 import { Route, getRoutes } from "./Routes.js";
 import { DnsProbeState, getProbeState, probeBox, probeDue, saveProbeState } from "./DnsProbe.js";
-import { getAcmeTxt } from "./AcmeDns.js";
+import { APEX_ACME_LABEL, getAcmeTxt } from "./AcmeDns.js";
 import { boxGatewayIps, healthyGatewayIps, startGatewayHealth, stopGatewayHealth } from "./GatewayHealth.js";
 import * as pdns from "./PowerDns.js";
 import { parseZoneFile, ZoneFileError, ZoneRecord } from "./ZoneFile.js";
@@ -39,7 +39,7 @@ import { queryNs } from "./DnsWire.js";
  *   DNS-01 TXT, CAA. Nothing is set by hand: the NS record in the parent decides.
  * - the apex zone <SERVER_DOMAIN> itself, when DNS_STATIC_ZONE_FILE is set: the static
  *   file plus what the backend derives (apex NS, the * wildcard to the gateways, the
- *   ip.<zone> and every user zone's NS).
+ *   ip.<zone> and every user zone's NS, the gateways' DNS-01 TXT at _acme-challenge.<zone>).
  */
 
 /** Redis sorted set: IP → last time an agent registered it (ms). */
@@ -897,6 +897,8 @@ export interface ApexInput {
   ipZone?: string;
   /** Labels of every user zone on the primary: <label>.<zone> NS our nameservers. */
   userZones: string[];
+  /** Live DNS-01 values of the gateways' *.<zone> orders (POST /acme-dns/present). */
+  acmeTxt?: string[];
 }
 
 /**
@@ -922,8 +924,17 @@ export function desiredApexRRsets(input: ApexInput): { rrsets: pdns.PdnsRRset[];
   if (ipZone && ipZone.endsWith(`.${apex}`)) cuts.push(ipZone);
   for (const label of [...input.userZones].sort()) cuts.push(pdns.fqdn(userZoneName(label)).toLowerCase());
   dynamic.push(...cuts.map(ns));
+  // the challenge TXT is the backend's even when no order is running: a line for it in
+  // the file is left out, so a stale value never outlives its order
+  const challenge = acmeChallengeName(input.zone).toLowerCase();
+  if (input.acmeTxt?.length) {
+    dynamic.push({
+      name: challenge, type: "TXT", ttl: ACME_TXT_TTL,
+      records: [...input.acmeTxt].sort().map((v) => ({ content: `"${v}"`, disabled: false })),
+    });
+  }
 
-  const owned = new Set(dynamic.map((r) => `${r.name} ${r.type}`));
+  const owned = new Set([...dynamic.map((r) => `${r.name} ${r.type}`), `${challenge} TXT`]);
   const groups = new Map<string, pdns.PdnsRRset>();
   const skipped: string[] = [];
   for (const rec of input.records) {
@@ -970,7 +981,7 @@ export async function loadApexRRsets(): Promise<{ rrsets: pdns.PdnsRRset[]; skip
   const records = parseZoneFile(await fsp.readFile(file, "utf8"), zone);
   return desiredApexRRsets({
     zone, records, nsHosts: getDnsNsHosts(), gatewayIps: healthyGatewayIps(), ipZone: getDnsIpZone(),
-    userZones: await listUserZoneLabels(),
+    userZones: await listUserZoneLabels(), acmeTxt: await getAcmeTxt(APEX_ACME_LABEL),
   });
 }
 

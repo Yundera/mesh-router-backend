@@ -11,7 +11,8 @@ import { getServerDomain } from "../configuration/config.js";
 
 /** A value lives this long, then the full pass removes it from the zone. */
 export const ACME_TXT_LIFETIME_MS = 10 * 60 * 1000;
-/** Two per order (the wildcard and the apex validate together), box and gateway may order at once. */
+/** Two per order (the wildcard and the apex validate together), box and gateway may order at once;
+ * at the apex, two gateways ordering in the same window. */
 const MAX_VALUES = 4;
 const RATE_LIMIT = 10;
 const RATE_WINDOW_SECONDS = 60 * 60;
@@ -33,6 +34,19 @@ export function acmeLabelFromFqdn(fqdn: unknown): string | null {
   if (!name.startsWith(prefix) || !name.endsWith(suffix)) return null;
   const label = name.slice(prefix.length, -suffix.length);
   return /^[a-z0-9-]+$/.test(label) ? label : null;
+}
+
+/**
+ * The key the apex challenge `_acme-challenge.<SERVER_DOMAIN>` is stored under: the
+ * gateways' own *.<zone> orders (phase-1.1-gateway-tls.md §6.1). Not a valid user label,
+ * so it never collides with one.
+ */
+export const APEX_ACME_LABEL = "@";
+
+/** True for lego's httpreq fqdn `_acme-challenge.<SERVER_DOMAIN>.` (any case, dot optional). */
+export function isApexAcmeFqdn(fqdn: unknown): boolean {
+  if (typeof fqdn !== "string") return false;
+  return fqdn.toLowerCase().replace(/\.+$/, "") === `_acme-challenge.${getServerDomain().toLowerCase()}`;
 }
 
 function txtKey(label: string): string {
