@@ -13,7 +13,9 @@ import { getRedisClient } from "../redis/redisClient.js";
  * passes dot names and the user apex through raw to the box over its tunnel
  * (phase-1.1-gateway-tls.md §3), so the handshake still reaches the box's own
  * certificate. Such a probe only reports; the answer rule needs a public IP to answer
- * the box directly.
+ * the box directly. The apex is the exception: the gateway terminates it with its own
+ * `*.<zone>` while the box has no trusted certificate, so the apex must be named
+ * exactly by the certificate (`exact` in handshake) or the probe would trust itself back.
  */
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -68,8 +70,19 @@ interface Handshake {
   notAfter?: Date;
 }
 
-/** One TLS handshake to ip:port with SNI `servername`, verified against `ca`. */
-function handshake(ip: string, port: number, servername: string, ca?: (string | Buffer)[]): Promise<Handshake> {
+/** Whether a certificate's subjectAltName string lists `name` itself as a DNS name. */
+export function namesExactly(subjectAltName: string | undefined, name: string): boolean {
+  const want = `dns:${name.toLowerCase()}`;
+  return (subjectAltName || "").split(",").some((entry) => entry.trim().toLowerCase() === want);
+}
+
+/**
+ * One TLS handshake to ip:port with SNI `servername`, verified against `ca`. `exact`: the
+ * certificate must name `servername` itself, not only through a parent wildcard. The user
+ * apex needs it: a gateway terminates the apex of a box without a trusted certificate and
+ * presents its own `*.<zone>`, which matches the apex but is not the box's.
+ */
+function handshake(ip: string, port: number, servername: string, ca?: (string | Buffer)[], exact = false): Promise<Handshake> {
   return new Promise((resolve) => {
     const socket = tls.connect({
       host: ip,
@@ -92,6 +105,13 @@ function handshake(ip: string, port: number, servername: string, ca?: (string | 
         return;
       }
       const nameError = tls.checkServerIdentity(servername, peer);
+      if (!nameError && exact && !namesExactly(peer?.subjectaltname, servername)) {
+        done({
+          ok: false, connected: true, issuer, notAfter,
+          error: `no certificate naming ${servername} itself (a parent wildcard: the gateway's)`,
+        });
+        return;
+      }
       done({ ok: !nameError, connected: true, error: nameError?.message, issuer, notAfter });
     });
     socket.once("timeout", () => done({ ok: false, connected: false, error: "timeout" }));
@@ -113,7 +133,8 @@ export async function probeBox(fqdn: string, publicIp: string | null, options: P
   const where = publicIp ? `${target}` : `gateway ${target}`;
   const port = options.port ?? 443;
   const names = [fqdn, `mesh-probe.${fqdn}`];
-  const results = await Promise.all(names.map((name) => handshake(target, port, name, options.trustedCa)));
+  // names[0] is the apex: exact, the gateway's *.<zone> must not pass for the box's
+  const results = await Promise.all(names.map((name, i) => handshake(target, port, name, options.trustedCa, i === 0)));
   const probeOk = results.every((r) => r.connected);
   const first = results[0];
 

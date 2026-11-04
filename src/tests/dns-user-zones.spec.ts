@@ -179,6 +179,16 @@ describe("DNS probe", function () {
     } finally {
       s.close();
     }
+    // the gateway's *.<zone> on the apex (gateway fallback) + the box's wildcard: not the box's apex
+    const gatewayApex = makeCerts(["*.test.example.com", `*.${zone}`], 60);
+    s = await serve(gatewayApex.cert, gatewayApex.key);
+    try {
+      const st = await probeBox(zone, null, { port: s.port, trustedCa: [gatewayApex.ca], meshCa: [], gatewayIp: "127.0.0.1" });
+      expect(st.cert).to.equal("none");
+      expect(st.reason).to.contain(`${zone}: no certificate naming ${zone} itself`);
+    } finally {
+      s.close();
+    }
     const down = await probeBox(zone, "127.0.0.1", { port: 1, trustedCa: [good.ca] });
     expect(down).to.include({ cert: "none", probeOk: false });
     expect((await probeBox(zone, null)).reason).to.contain("no public IP");
