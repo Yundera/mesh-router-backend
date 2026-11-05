@@ -10,6 +10,9 @@ export interface NSLRouterDns {
     // written by the backend: the parent zone delegates <user>.<zone> to our nameservers
     // (seen by public resolvers); absent = dormant (zone served, asked by nobody)
     live?: boolean;
+    // ISO time the zone went live (absent on zones that went live before backend 2.0.62):
+    // the gateways' fallback-certificate grace counts from it
+    liveSince?: string;
     // whole user: auto = answer rule, gateway = always the gateway, direct = box IP (admin)
     force?: DnsForce;
     // per host label ("immich" for immich.<user>.<zone>), overrides `force`

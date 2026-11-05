@@ -81,6 +81,7 @@ Response includes both accepted and rejected routes:
 | GET | `/ca-cert` | Public | Get CA public certificate (PEM format) |
 | POST | `/cert/:userid/:sig` | Ed25519 Signature | Sign a CSR and get certificate (hop name + optional IP SAN) |
 | POST | `/gateway-cert/:ip` | GATEWAY_CERT_TOKEN | Sign a gateway's CSR (PEM body, RSA): `<ip-dashed>.gw.<zone>` + IP SAN, for the handoff between gateways; `:ip` must be in `DNS_GATEWAY_IPS` |
+| GET | `/gateway/fallback-labels` | GATEWAY_CERT_TOKEN or service key | Live users a gateway holds a fallback `*.<user>.<zone>` for: `{labels:[{label, liveSince?}]}` (nameserver `phase-1.1-gateway-tls.md` §6.3) |
 
 ### Example Usage
 
@@ -141,7 +142,11 @@ pnpm install
 | `CA_CERT_PATH` | No | Path to CA certificate for PKI (default: `config/ca-cert.pem`) |
 | `CA_KEY_PATH` | No | Path to CA private key for PKI (default: `config/ca-key.pem`) |
 | `CERT_VALIDITY_HOURS` | No | Certificate validity in hours (default: 72) |
-| `GATEWAY_CERT_TOKEN` | No | Token the gateways present on `POST /gateway-cert/:ip` for their mesh certificate (handoff between gateways); unset = endpoint closed (503) |
+| `GATEWAY_CERT_TOKEN` | No | Token the gateways present on `POST /gateway-cert/:ip` for their mesh certificate (handoff between gateways), on the acme-dns httpreq routes (their `*.<zone>` and live users' fallback `*.<user>.<zone>`) and on `GET /gateway/fallback-labels`; unset = closed (503) |
+| `ACME_GATEWAY_RATE_LIMIT` | No | Challenge updates per hour per gateway credential (default: 300) |
+| `DNS_CAA_GATEWAY_ISSUERS` | No | Extra CAA values in user zones that carry a CAA RRset, `\|`-separated, so the gateways' fallback orders pass it, e.g. `sectigo.com\|letsencrypt.org; accounturi=<gateway account>` (ZeroSSL = `sectigo.com`). Default: none |
+| `DNS_GATEWAY_FALLBACK_REQUIRED` | No | `1`: a gateway missing a live user's fallback certificate leaves the answers (never the last one). Default: coverage only reported in `/dns/health` |
+| `DNS_GATEWAY_FALLBACK_GRACE_MINUTES` | No | Minutes a zone may be live before the gateways are expected to cover it (default: 30) |
 | `GATEWAY_CERT_VALIDITY_DAYS` | No | Gateway certificate validity in days (default: 30) |
 | `CERT_EXTRA_SANS` | No | Extra DNS SANs on every box certificate, comma-separated (e.g. `*.ip.inojob.com` for the ip.<zone> nameserver). Default: none |
 | `INACTIVE_DOMAIN_DAYS` | No | Days of inactivity before domain cleanup (default: 30) |

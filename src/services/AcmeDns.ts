@@ -11,9 +11,10 @@ import { getServerDomain } from "../configuration/config.js";
 
 /** A value lives this long, then the full pass removes it from the zone. */
 export const ACME_TXT_LIFETIME_MS = 10 * 60 * 1000;
-/** Two per order (the wildcard and the apex validate together), box and gateway may order at once;
- * at the apex, two gateways ordering in the same window. */
-const MAX_VALUES = 4;
+/** Two per box order (the wildcard and the apex validate together), plus one per gateway
+ * ordering the user's fallback *.<label>.<zone> in the same window; at the apex, the
+ * gateways' own *.<zone> orders. */
+const MAX_VALUES = 8;
 const RATE_LIMIT = 10;
 const RATE_WINDOW_SECONDS = 60 * 60;
 
@@ -86,12 +87,17 @@ function rateKey(uid: string): string {
   return `acme:rate:${uid}`;
 }
 
-/** Count one update; false once the user is past RATE_LIMIT within the window. */
-export async function takeAcmeUpdate(uid: string): Promise<boolean> {
+/** Count one update; false once the key is past its limit (RATE_LIMIT for a box) within the window. */
+export async function takeAcmeUpdate(uid: string, limit = RATE_LIMIT): Promise<boolean> {
   const redis = getRedisClient();
   const count = await redis.incr(rateKey(uid));
   if (count === 1) await redis.expire(rateKey(uid), RATE_WINDOW_SECONDS);
-  return count <= RATE_LIMIT;
+  return count <= limit;
+}
+
+/** The rate-limit key of a gateway credential (apex and user challenges alike). */
+export function gatewayRateKey(gateway: string | undefined): string {
+  return `gateway:${gateway ?? "service"}`;
 }
 
 /** Updates used in the current window, and seconds until it resets. */

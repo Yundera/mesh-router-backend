@@ -9,6 +9,7 @@ import {
   getDnsGatewayIps,
   getDnsIpZone,
   getDnsNsHosts,
+  getCaaGatewayIssuers,
   getDnsStaticZoneFile,
   getPdnsApiUrl,
   getServerDomain,
@@ -339,12 +340,16 @@ export function isAcmeAccountUri(uri: unknown): uri is string {
 }
 
 /**
- * The zone's CAA records (phase-1.1-gateway-tls.md §7): Let's Encrypt only, and only for the
- * box's own ACME accounts, for names and wildcards alike. No account = none (any CA may issue).
+ * The zone's CAA records (phase-1.1-gateway-tls.md §7): Let's Encrypt for the box's own ACME
+ * accounts, plus the gateways' issuers (DNS_CAA_GATEWAY_ISSUERS: their fallback
+ * *.<user>.<zone> orders), for names and wildcards alike. No box account = none (any CA may
+ * issue), whatever the gateways' list.
  */
-export function caaRecords(accounts: string[]): string[] {
-  const sorted = [...accounts].sort();
-  return ["issue", "issuewild"].flatMap((tag) => sorted.map((a) => `0 ${tag} "letsencrypt.org; accounturi=${a}"`));
+export function caaRecords(accounts: string[], gatewayIssuers: string[] = getCaaGatewayIssuers()): string[] {
+  if (!accounts.length) return [];
+  const values = [...accounts.map((a) => `letsencrypt.org; accounturi=${a}`), ...gatewayIssuers];
+  const unique = [...new Set(values)].sort();
+  return ["issue", "issuewild"].flatMap((tag) => unique.map((v) => `0 ${tag} "${v}"`));
 }
 
 /**
@@ -641,6 +646,19 @@ async function getScope(force = false): Promise<Map<string, ScopeUser>> {
   return scope;
 }
 
+/**
+ * The live users' labels, for the gateways' fallback certificates (GET
+ * /gateway/fallback-labels and the coverage check): only live zones, since dormant ones
+ * publish no challenge TXT and their dot names are asked by nobody. `liveSince` is absent
+ * for zones that went live before it was recorded. Empty when user zones are off.
+ */
+export async function liveLabels(): Promise<{ label: string; liveSince?: string }[]> {
+  if (!isUserZonesEnabled()) return [];
+  return (await liveUsers())
+    .map((u) => ({ label: u.label.toLowerCase(), ...(u.dns?.liveSince ? { liveSince: u.dns.liveSince } : {}) }))
+    .sort((a, b) => a.label.localeCompare(b.label));
+}
+
 /** True when the user is live: the parent zone delegates its names to our nameservers. */
 export function isInScope(data: NSLRouterData | null | undefined): boolean {
   return !!data?.domainName && !!data.dns?.live;
@@ -860,15 +878,16 @@ export async function refreshLive(uid: string, data: NSLRouterData, force = fals
 }
 
 async function setLive(uid: string, data: NSLRouterData, live: boolean): Promise<void> {
+  const liveSince = new Date().toISOString();
   await getFirestore().collection(NSL_ROUTER_COLLECTION).doc(uid).update(
     live
       // `delegated` is the flag of the manual flow this replaces: dropped on the way
-      ? { "dns.live": true, "dns.delegated": FieldValue.delete() }
-      : { "dns.live": FieldValue.delete() }
+      ? { "dns.live": true, "dns.liveSince": liveSince, "dns.delegated": FieldValue.delete() }
+      : { "dns.live": FieldValue.delete(), "dns.liveSince": FieldValue.delete() }
   );
   console.log(`[dns] ${data.domainName}: ${live ? "live (delegated to our nameservers)" : "dormant (no delegation any more)"}`);
-  const { live: _was, ...rest } = data.dns ?? {};
-  await resyncUser(uid, { ...data, dns: live ? { ...rest, live: true } : rest });
+  const { live: _was, liveSince: _since, ...rest } = data.dns ?? {};
+  await resyncUser(uid, { ...data, dns: live ? { ...rest, live: true, liveSince } : rest });
 }
 
 /** Live users in the current scope. */
@@ -1331,7 +1350,7 @@ export function startDnsReconciler(intervalMs = 60_000): void {
   };
   pass();
   fullPassTimer = setInterval(() => void pass(), intervalMs);
-  if (users) startGatewayHealth(() => void pass(true));
+  if (users) startGatewayHealth(() => void pass(true), liveLabels);
   if (allow) {
     console.log(`[dns] allowlist on: ${allowZoneName()} every ${intervalMs / 1000}s, grace ${getDnsAllowGraceSeconds()}s`);
   }

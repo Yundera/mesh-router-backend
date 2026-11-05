@@ -2,7 +2,8 @@ import { describe, it } from "mocha";
 import { expect } from "chai";
 import * as net from "net";
 import * as http from "http";
-import { checkGateway, checkProvider, GatewayCert, gatewayCertProblem, GatewayState, inSubnet, nextState, pickForBox, pickHealthy, routesForGateways, toGatewayCert } from "../services/GatewayHealth.js";
+import { checkGateway, checkProvider, coverageBlocks, fallbackCoverage, GatewayCert, gatewayCertProblem, GatewayState, inSubnet, nextState, pickForBox, pickHealthy, routesForGateways, toGatewayCert } from "../services/GatewayHealth.js";
+import { evaluate } from "../services/DnsHealth.js";
 import type { PeerCertificate } from "tls";
 import { gatewayCertName } from "../services/CertificateAuthority.js";
 
@@ -157,6 +158,50 @@ describe("Gateway health", () => {
 
     it("names a gateway certificate under the reserved gw label", () => {
       expect(gatewayCertName("51.15.79.231", "InoJob.com")).to.equal("51-15-79-231.gw.inojob.com");
+    });
+  });
+
+  describe("fallback coverage", () => {
+    const now = new Date("2026-11-05T12:00:00Z");
+    const grace = 30 * 60_000;
+    const far = "2027-02-01T00:00:00.000Z";
+
+    it("counts users live past the grace, or since an unknown time", () => {
+      const live = [
+        { label: "wisera" },
+        { label: "alice", liveSince: "2026-11-05T11:00:00Z" },
+        { label: "fresh", liveSince: "2026-11-05T11:50:00Z" },
+      ];
+      const cov = fallbackCoverage({ wisera: far }, live, grace, now);
+      expect(cov.total).to.equal(2);
+      expect(cov.covered).to.equal(1);
+      expect(cov.missing).to.deep.equal(["alice"]);
+    });
+
+    it("does not count a certificate about to expire", () => {
+      const cov = fallbackCoverage({ wisera: "2026-11-05T20:00:00Z" }, [{ label: "wisera" }], grace, now);
+      expect(cov.covered).to.equal(0);
+      expect(cov.missing).to.deep.equal(["wisera"]);
+    });
+
+    it("keeps a gateway out only when required and known incomplete", () => {
+      const incomplete = fallbackCoverage({}, [{ label: "wisera" }], grace, now);
+      const complete = fallbackCoverage({ wisera: far }, [{ label: "wisera" }], grace, now);
+      expect(coverageBlocks(incomplete, true)).to.equal(true);
+      expect(coverageBlocks(incomplete, false)).to.equal(false);
+      expect(coverageBlocks(complete, true)).to.equal(false);
+      expect(coverageBlocks({ ...incomplete, error: "status 404" }, true)).to.equal(false);
+      expect(coverageBlocks(undefined, true)).to.equal(false);
+    });
+
+    it("reports an incomplete coverage in /dns/health", () => {
+      const g: GatewayState = {
+        ip: "192.0.2.1", up: true, streak: 0,
+        coverage: { total: 3, covered: 1, missing: ["alice", "bob"], checkedAt: now.toISOString() },
+      };
+      const health = evaluate([], true, 0, now.getTime(), [g], 0, 0, true);
+      expect(health.problems.some((p) => p.includes("fallback certificates for 1/3") && p.includes("out of the answers"))).to.equal(true);
+      expect(health.gateways[0].coverage).to.include({ total: 3, covered: 1 });
     });
   });
 });

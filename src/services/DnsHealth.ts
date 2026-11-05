@@ -1,8 +1,8 @@
 import { promises as dnsp } from "dns";
-import { getDnsCatalogZone, getDnsIpZone, getDnsNsHosts, getGatewayCertMinDays, getServerDomain } from "../configuration/config.js";
+import { getDnsCatalogZone, getDnsIpZone, getDnsNsHosts, getGatewayCertMinDays, getServerDomain, isGatewayFallbackRequired } from "../configuration/config.js";
 import { isDnsEnabled, isUserZonesEnabled, liveUsers, missingFromParent, storedParentDelegation } from "./DnsZones.js";
 import * as pdns from "./PowerDns.js";
-import { GatewayCert, gatewayCertProblem, GatewayState, gatewayStates } from "./GatewayHealth.js";
+import { GatewayCert, gatewayCertProblem, GatewayCoverage, GatewayState, gatewayStates } from "./GatewayHealth.js";
 
 /**
  * Health of the public nameservers, for an external monitor (GET /dns/health).
@@ -62,7 +62,7 @@ export interface DnsHealth {
   checkedAt: string;
   primary: { reachable: boolean; zones: number; dormantUserZones?: number; partialDelegations?: number };
   nameservers: NameserverHealth[];
-  gateways: { ip: string; up: boolean; lastError?: string; changedAt?: string; tunnel?: { up: boolean; lastError?: string; changedAt?: string }; cert?: GatewayCert }[];
+  gateways: { ip: string; up: boolean; lastError?: string; changedAt?: string; tunnel?: { up: boolean; lastError?: string; changedAt?: string }; cert?: GatewayCert; coverage?: GatewayCoverage }[];
   problems: string[];
 }
 
@@ -143,6 +143,7 @@ export function evaluate(
   gateways: GatewayState[] = [],
   partialDelegations = 0,
   certMinDays = 0,
+  fallbackRequired = false,
 ): DnsHealth {
   const problems: string[] = [];
   const nameservers = servers.map((s): NameserverHealth => {
@@ -187,6 +188,12 @@ export function evaluate(
     }
     const cert = gatewayCertProblem(g.cert, getServerDomain(), certMinDays, new Date(now));
     if (cert) problems.push(`gateway ${g.ip}: ${cert}`);
+    const cov = g.coverage;
+    if (cov && !cov.error && cov.covered < cov.total) {
+      problems.push(`gateway ${g.ip}: fallback certificates for ${cov.covered}/${cov.total} live users`
+        + (cov.missing.length ? ` (missing ${cov.missing.join(", ")})` : "")
+        + (fallbackRequired ? " (out of the answers)" : ""));
+    }
   }
 
   let status: DnsHealthStatus;
@@ -202,10 +209,11 @@ export function evaluate(
     checkedAt: new Date(now).toISOString(),
     primary: { reachable: primaryReachable, zones: primaryZones, ...(partialDelegations ? { partialDelegations } : {}) },
     nameservers,
-    gateways: gateways.map(({ ip, up, lastError, changedAt, tunnel, cert }) => ({
+    gateways: gateways.map(({ ip, up, lastError, changedAt, tunnel, cert, coverage }) => ({
       ip, up, lastError, changedAt,
       ...(tunnel ? { tunnel: { up: tunnel.up, lastError: tunnel.lastError, changedAt: tunnel.changedAt } } : {}),
       ...(cert ? { cert } : {}),
+      ...(coverage ? { coverage } : {}),
     })),
     problems,
   };
@@ -284,7 +292,7 @@ async function check(): Promise<DnsHealth> {
       }
     }
   }
-  const health = evaluate(servers, primaryReachable || !primaryConfigured, expected.length, now, gatewayStates(), partialDelegations, getGatewayCertMinDays());
+  const health = evaluate(servers, primaryReachable || !primaryConfigured, expected.length, now, gatewayStates(), partialDelegations, getGatewayCertMinDays(), isGatewayFallbackRequired());
   if (dormant) health.primary.dormantUserZones = dormant;
   if (health.problems.length) console.warn(`[dns-health] ${health.status}: ${health.problems.join("; ")}`);
   return health;

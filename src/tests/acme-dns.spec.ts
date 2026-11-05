@@ -168,13 +168,17 @@ describe("acme-dns API on the PowerDNS primary", function () {
       expect((await call("present", { fqdn: `_acme-challenge.${userZoneName(other.uid)}.`, value: txt("g") })).status).to.equal(403);
     });
 
-    it("lets a gateway credential set the apex challenge only", async () => {
+    it("lets a gateway credential set the apex and live users' challenges", async () => {
       const saved = process.env.GATEWAY_CERT_TOKEN;
       process.env.GATEWAY_CERT_TOKEN = "acme-dns-test-gateway-token";
       const gw = `Basic ${Buffer.from("192.0.2.10:acme-dns-test-gateway-token").toString("base64")}`;
       const apex = `_acme-challenge.${process.env.SERVER_DOMAIN}.`;
       try {
-        expect((await call("present", { fqdn: fqdn(), value: txt("g") }, gw)).status).to.equal(403);
+        // the gateway's fallback *.<user>.<zone>: a live user only
+        expect((await call("present", { fqdn: fqdn(), value: txt("g") }, gw)).status).to.equal(200);
+        expect(await zoneTxt(uid)).to.deep.equal([`"${txt("g")}"`]);
+        expect((await call("cleanup", { fqdn: fqdn(), value: txt("g") }, gw)).status).to.equal(200);
+        expect((await call("present", { fqdn: `_acme-challenge.${userZoneName(other.uid)}.`, value: txt("g") }, gw)).status).to.equal(403);
         // no DNS_STATIC_ZONE_FILE in the tests: the apex zone is not ours
         expect((await call("present", { fqdn: apex, value: txt("g") }, gw)).status).to.equal(409);
         expect((await call("present", { fqdn: apex, value: "short" }, gw)).status).to.equal(400);

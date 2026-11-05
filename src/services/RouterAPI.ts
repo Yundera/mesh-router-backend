@@ -2,7 +2,7 @@ import express, { Request } from "express";
 import {verifySignature} from "../library/KeyLib.js";
 import {authenticate, authenticateService, AuthUserRequest} from "./ExpressAuthenticateMiddleWare.js";
 import {checkDomainAvailability, deleteUserDomain, getUserDomain, updateUserDomain, checkOnlineStatus, getDomain, updateLastRouteRegistration, getAllUserDomains} from "./Domain.js";
-import {getServerDomain, getInactiveDomainDays, getDnsIpZone, getDnsGatewayIps, getTunnelProviders, getInboundMailConfig, getMailConfirmBase, getGatewayCertToken} from "../configuration/config.js";
+import {getServerDomain, getInactiveDomainDays, getDnsIpZone, getDnsGatewayIps, getTunnelProviders, getInboundMailConfig, getMailConfirmBase, getGatewayCertToken, getAcmeGatewayRateLimit} from "../configuration/config.js";
 import {registerRoutes, getRoutes, deleteRoutes, Route, getRoutesTTL, getActiveUserIds, getActivityTimestamp} from "./Routes.js";
 import {validateRoutes, normalizeRoute} from "./RouteValidator.js";
 import {getCACertificate, signCSR, isCAInitialized, signGatewayCSR, gatewayCertName} from "./CertificateAuthority.js";
@@ -11,11 +11,11 @@ import {logDomainAssigned} from "./DomainLogger.js";
 import {runCleanup} from "./DomainCleanup.js";
 import {probeCandidates, checkRateLimit, PROBE_LIMITS} from "./Probe.js";
 import {recordUsage, isReportableDate, isValidAppName, MAX_USAGE_EVENTS_PER_REQUEST} from "./Usage.js";
-import {noteRoutes, onRegistration, isUserZonesEnabled, viewUser, isInScope, resyncUser, setForce, setCaaAccounts, isAcmeAccountUri, MAX_CAA_ACCOUNTS, isApexZoneEnabled, syncApex} from "./DnsZones.js";
+import {noteRoutes, onRegistration, isUserZonesEnabled, viewUser, isInScope, resyncUser, setForce, setCaaAccounts, isAcmeAccountUri, MAX_CAA_ACCOUNTS, isApexZoneEnabled, syncApex, liveLabels} from "./DnsZones.js";
 import {hopName, acceptsProxyProtocol, setProxyProtocol} from "./HopNames.js";
 import {getDnsHealth, httpStatusFor} from "./DnsHealth.js";
 import {NSLRouterData} from "../DataBaseDTO/DataBaseNSLRouter.js";
-import {acmeLabelFromFqdn, addAcmeTxt, isAcmeTxtValue, removeAcmeTxt, takeAcmeUpdate, isApexAcmeFqdn, APEX_ACME_LABEL} from "./AcmeDns.js";
+import {acmeLabelFromFqdn, addAcmeTxt, isAcmeTxtValue, removeAcmeTxt, takeAcmeUpdate, isApexAcmeFqdn, APEX_ACME_LABEL, gatewayRateKey} from "./AcmeDns.js";
 import {verifyEmailCredential, sendUserEmail, EmailError, EmailSendRequest} from "./Email.js";
 import {MAX_INBOUND_BYTES, tokenMatches, readInboundForm, handleInbound, inboundDeps} from "./InboundMail.js";
 import {UserMailError, forwardView, setForward, clearForward, confirmForward, suppressionReason, confirmPage} from "./UserMail.js";
@@ -73,8 +73,9 @@ function authenticateServiceOrBasic(req: Request, res: express.Response, next: e
 
 /**
  * The httpreq routes also take a gateway's GATEWAY_CERT_TOKEN (Basic password, the
- * gateway's IP as user, or Bearer): that credential may only write the apex challenge
- * (`res.locals.acmeGateway` set), checked in the handler. Anything else is the service key.
+ * gateway's IP as user, or Bearer): `res.locals.acmeGateway` is set, and the handler counts
+ * its updates per gateway. It writes the apex challenge (the gateway's own *.<zone>) and live
+ * users' challenges (its fallback *.<user>.<zone>). Anything else is the service key.
  */
 function authenticateAcmeHttpreq(req: Request, res: express.Response, next: express.NextFunction) {
   const header = req.get('Authorization') || '';
@@ -1223,8 +1224,9 @@ export function routerAPI(expressApp: express.Application, checkRoutes = validat
    * - `_acme-challenge.<zone>.`: a gateway's own *.<zone> order (phase-1.1-gateway-tls.md
    *   §6.1), with GATEWAY_CERT_TOKEN (or the service key). Written to the apex zone,
    *   which must be ours (DNS_STATIC_ZONE_FILE); several gateways' values coexist.
-   * - `_acme-challenge.<label>.<zone>.` of a live user, with SERVICE_API_KEY only: the
-   *   gateway needs certs only for names our nameservers really serve.
+   * - `_acme-challenge.<label>.<zone>.` of a live user, with GATEWAY_CERT_TOKEN (a
+   *   gateway's fallback *.<user>.<zone>, counted per gateway) or the service key. Live only:
+   *   the gateway needs certs only for names our nameservers really serve.
    */
   const httpreq = (action: 'present' | 'cleanup') => async (req: Request, res: express.Response) => {
     const { fqdn, value } = req.body ?? {};
@@ -1237,7 +1239,7 @@ export function routerAPI(expressApp: express.Application, checkRoutes = validat
         if (!isApexZoneEnabled()) {
           return res.status(409).json({ error: "The apex zone is not served by our nameservers (DNS_STATIC_ZONE_FILE)." });
         }
-        if (action === 'present' && !(await takeAcmeUpdate(`gateway:${gateway ?? "service"}`))) {
+        if (action === 'present' && !(await takeAcmeUpdate(gatewayRateKey(gateway), gateway ? getAcmeGatewayRateLimit() : undefined))) {
           return res.status(429).json({ error: "Too many challenge updates, try again within the hour." });
         }
         if (action === 'present') await addAcmeTxt(APEX_ACME_LABEL, value);
@@ -1245,10 +1247,6 @@ export function routerAPI(expressApp: express.Application, checkRoutes = validat
         await syncApex();
         console.log(`[acme-dns] apex: ${gateway ? `gateway ${gateway}` : "service"} ${action}`);
         return res.status(200).json({});
-      }
-      if (gateway) {
-        logAuthFailure(req, 'acme_gateway_foreign_name', { fqdn: String(fqdn) });
-        return res.status(403).json({ error: "A gateway credential may only set _acme-challenge.<zone>." });
       }
       const label = acmeLabelFromFqdn(fqdn);
       if (!label) {
@@ -1261,10 +1259,15 @@ export function routerAPI(expressApp: express.Application, checkRoutes = validat
       if (!found || !isInScope(found.domain) || !isUserZonesEnabled()) {
         return res.status(403).json({ error: `${label} is not delegated to our nameservers.` });
       }
+      // a gateway's fallback *.<label>.<zone> (phase-1.1-gateway-tls.md §6): counted per
+      // gateway, so a fleet of users fits; the box's own orders stay on its 10/h
+      if (action === 'present' && gateway && !(await takeAcmeUpdate(gatewayRateKey(gateway), getAcmeGatewayRateLimit()))) {
+        return res.status(429).json({ error: "Too many challenge updates, try again within the hour." });
+      }
       if (action === 'present') await addAcmeTxt(label, value);
       else await removeAcmeTxt(label, value);
       await resyncUser(found.uid, found.domain);
-      console.log(`[acme-dns] ${label}: gateway ${action}`);
+      console.log(`[acme-dns] ${label}: ${gateway ? `gateway ${gateway}` : "service"} ${action}`);
       return res.status(200).json({});
     } catch (error) {
       console.error(`Error in POST /acme-dns/${action}`, error);
@@ -1273,6 +1276,22 @@ export function routerAPI(expressApp: express.Application, checkRoutes = validat
   };
   router.post('/acme-dns/present', authenticateAcmeHttpreq, httpreq('present'));
   router.post('/acme-dns/cleanup', authenticateAcmeHttpreq, httpreq('cleanup'));
+
+  /**
+   * GET /gateway/fallback-labels
+   * The live users a gateway holds a fallback *.<label>.<zone> for (phase-1.1-gateway-tls.md
+   * §6): {labels: [{label, liveSince?}]}. Gateway credential (GATEWAY_CERT_TOKEN, Bearer or
+   * Basic password) or the service key. Dormant zones are left out: they publish no
+   * challenge TXT and their dot names are asked by nobody.
+   */
+  router.get('/gateway/fallback-labels', authenticateAcmeHttpreq, async (req, res) => {
+    try {
+      return res.status(200).json({ labels: await liveLabels() });
+    } catch (error) {
+      console.error("Error in GET /gateway/fallback-labels", error);
+      return res.status(500).json({ error: String(error) });
+    }
+  });
 
   /**
    * GET /dns/health

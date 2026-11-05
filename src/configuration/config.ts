@@ -243,6 +243,53 @@ export function getGatewayCertToken(): string {
 }
 
 /**
+ * Challenge updates per hour a gateway credential may make (ACME_GATEWAY_RATE_LIMIT,
+ * default 300). A gateway orders a fallback *.<user>.<zone> for every live user, so it
+ * needs far more than a box's 10.
+ */
+export function getAcmeGatewayRateLimit(): number {
+  const n = Number(process.env.ACME_GATEWAY_RATE_LIMIT || 300);
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : 300;
+}
+
+/**
+ * Extra CAA values for user zones that carry a CAA RRset (DNS_CAA_GATEWAY_ISSUERS,
+ * `|`-separated), so the gateways' fallback orders pass it, e.g.
+ * `sectigo.com|letsencrypt.org; accounturi=https://acme-v02.api.letsencrypt.org/acme/acct/123`
+ * (ZeroSSL issues under `sectigo.com`). Each value is a CA domain, optionally followed by
+ * `; key=value` parameters. Malformed entries are skipped with a warning.
+ */
+export function getCaaGatewayIssuers(): string[] {
+  const out: string[] = [];
+  for (const entry of (process.env.DNS_CAA_GATEWAY_ISSUERS || "").split("|").map((s) => s.trim()).filter(Boolean)) {
+    if (!/^[a-z0-9.-]+\.[a-z]{2,}(\s*;\s*[a-z0-9-]+=[^\s;"]+)*$/i.test(entry)) {
+      console.warn(`DNS_CAA_GATEWAY_ISSUERS: skipping malformed entry "${entry}"`);
+      continue;
+    }
+    out.push(entry.replace(/\s*;\s*/g, "; "));
+  }
+  return out;
+}
+
+/**
+ * True when a gateway must hold a fallback certificate for every live user to stay in the
+ * answers (DNS_GATEWAY_FALLBACK_REQUIRED=1). Off by default: coverage is only reported.
+ */
+export function isGatewayFallbackRequired(): boolean {
+  return /^(1|true|on|yes)$/i.test((process.env.DNS_GATEWAY_FALLBACK_REQUIRED || "").trim());
+}
+
+/**
+ * Minutes a user zone may be live before a gateway is expected to cover it
+ * (DNS_GATEWAY_FALLBACK_GRACE_MINUTES, default 30): the time a gateway needs to notice the
+ * user and order its certificate.
+ */
+export function getGatewayFallbackGraceMinutes(): number {
+  const n = Number(process.env.DNS_GATEWAY_FALLBACK_GRACE_MINUTES || 30);
+  return Number.isFinite(n) && n >= 0 ? n : 30;
+}
+
+/**
  * Returns the tunnel providers boxes connect to, from TUNNEL_PROVIDERS (comma-separated
  * base URLs of each provider's registration API, e.g. https://51.15.79.231:8444). A box
  * always keeps the provider in its own PROVIDER string and adds these. Empty when unset.

@@ -1,7 +1,10 @@
 import * as tls from "tls";
 import * as https from "https";
 import * as http from "http";
-import { getDnsGatewayIps, getDnsGatewayTunnels, getServerDomain, GatewayTunnel } from "../configuration/config.js";
+import {
+  getDnsGatewayIps, getDnsGatewayTunnels, getGatewayFallbackGraceMinutes, getServerDomain, GatewayTunnel,
+  isGatewayFallbackRequired,
+} from "../configuration/config.js";
 
 /**
  * Health of the gateways in DNS_GATEWAY_IPS, so a dead one leaves the gateway answers
@@ -29,6 +32,14 @@ import { getDnsGatewayIps, getDnsGatewayTunnels, getServerDomain, GatewayTunnel 
  * fallback. Kept on the state for /dns/health (gatewayCertProblem), never verified here:
  * a bad certificate never takes a gateway out of the answers.
  *
+ * Fallback coverage (phase-1.1-gateway-tls.md §6): each gateway holds a fallback
+ * *.<user>.<zone> per live user, to terminate dot names while the box has no trusted
+ * certificate. Every COVERAGE_EVERY checks the backend reads the gateway's list
+ * (/.well-known/mesh-gateway/fallback) and compares it with the live labels. With
+ * DNS_GATEWAY_FALLBACK_REQUIRED=1 a gateway missing a label live for longer than the grace
+ * leaves the answers like a dead one (never the last: pickHealthy fails open); otherwise the
+ * coverage is only reported.
+ *
  * In memory: one backend, and a restart starts from "all up", the safe side.
  */
 
@@ -36,7 +47,31 @@ const INTERVAL_MS = 15_000;
 const TIMEOUT_MS = 5_000;
 const FALL = 2;
 const RISE = 2;
+/** Read each gateway's fallback list every this many checks (once a minute). */
+const COVERAGE_EVERY = 4;
+/** A fallback certificate closer to expiry than this does not count. */
+const FALLBACK_MIN_MS = 24 * 3600 * 1000;
+const COVERAGE_PATH = "/.well-known/mesh-gateway/fallback";
 
+/** A live user zone, as GET /gateway/fallback-labels lists it. */
+export interface LiveLabel {
+  label: string;
+  /** ISO time the zone went live; absent = before it was recorded (counted as old) */
+  liveSince?: string;
+}
+
+/** How much of the live users a gateway holds a fallback certificate for. */
+export interface GatewayCoverage {
+  /** labels expected (live longer than the grace) */
+  total: number;
+  /** of those, held with a certificate valid for at least a day */
+  covered: number;
+  /** a few of the missing labels, sorted */
+  missing: string[];
+  checkedAt: string;
+  /** the list could not be read (an older gateway, the endpoint off): coverage unknown */
+  error?: string;
+}
 /** What a gateway presented on the last handshake that completed. */
 export interface GatewayCert {
   notAfter: string;
@@ -58,6 +93,8 @@ export interface GatewayState {
   tunnel?: GatewayState;
   /** the certificate it presented on the last completed handshake */
   cert?: GatewayCert;
+  /** its fallback certificates against the live users, when read */
+  coverage?: GatewayCoverage;
 }
 
 const states = new Map<string, GatewayState>();
@@ -77,6 +114,32 @@ export function nextState(state: GatewayState, ok: boolean, error: string | unde
     next.changedAt = now.toISOString();
   }
   return next;
+}
+
+/**
+ * A gateway's coverage from its list (`held`: label → notAfter ISO) and the live labels:
+ * a label counts once it has been live for `graceMs` (or since an unknown time), and is
+ * covered when held with a certificate valid at least FALLBACK_MIN_MS more. Pure.
+ */
+export function fallbackCoverage(
+  held: Record<string, string>, live: LiveLabel[], graceMs: number, now: Date,
+): GatewayCoverage {
+  const expected = live.filter((l) => !l.liveSince || now.getTime() - new Date(l.liveSince).getTime() >= graceMs);
+  const missing = expected.filter((l) => {
+    const notAfter = held[l.label.toLowerCase()];
+    return !notAfter || new Date(notAfter).getTime() - now.getTime() < FALLBACK_MIN_MS;
+  }).map((l) => l.label.toLowerCase()).sort();
+  return {
+    total: expected.length,
+    covered: expected.length - missing.length,
+    missing: missing.slice(0, 5),
+    checkedAt: now.toISOString(),
+  };
+}
+
+/** True when the coverage keeps the gateway out of the answers: known and incomplete. Pure. */
+export function coverageBlocks(coverage: GatewayCoverage | undefined, required: boolean): boolean {
+  return required && !!coverage && !coverage.error && coverage.covered < coverage.total;
 }
 
 /** The answer set from the states: the healthy ones, else all (fail open). Pure. */
@@ -126,9 +189,15 @@ function tunnelStateOf(ip: string): GatewayState {
   return tunnelStates.get(ip) ?? { ip, up: true, streak: 0 };
 }
 
+/** Up, and not held back by an incomplete fallback coverage. */
+function answerable(ip: string): boolean {
+  const s = stateOf(ip);
+  return s.up && !coverageBlocks(s.coverage, isGatewayFallbackRequired());
+}
+
 /** The gateway IPs answered for a box that can serve the gateway's way, right now. */
 export function healthyGatewayIps(): string[] {
-  return pickHealthy(getDnsGatewayIps(), (ip) => stateOf(ip).up);
+  return pickHealthy(getDnsGatewayIps(), answerable);
 }
 
 /**
@@ -258,13 +327,51 @@ export function checkProvider(url: string): Promise<string | undefined> {
   });
 }
 
+/**
+ * GET https://<ip>/.well-known/mesh-gateway/fallback (SNI and Host gateway.entrypoint.<zone>,
+ * self-signed accepted): the gateway's fallback certificates, {labels: {label: notAfter}}.
+ */
+export function fetchFallbackList(ip: string, port = 443): Promise<{ error?: string; held?: Record<string, string> }> {
+  const host = `gateway.entrypoint.${getServerDomain()}`;
+  return new Promise((resolve) => {
+    const req = https.get({
+      host: ip, port, path: COVERAGE_PATH, servername: host, headers: { Host: host },
+      rejectUnauthorized: false, timeout: TIMEOUT_MS,
+    }, (res) => {
+      let body = "";
+      res.setEncoding("utf8");
+      res.on("data", (c: string) => { if (body.length < 4_000_000) body += c; });
+      res.on("end", () => {
+        if (res.statusCode !== 200) return resolve({ error: `status ${res.statusCode}` });
+        try {
+          const labels = JSON.parse(body)?.labels;
+          if (!labels || typeof labels !== "object" || Array.isArray(labels)) return resolve({ error: "no labels object" });
+          const held: Record<string, string> = {};
+          for (const [k, v] of Object.entries(labels)) if (typeof v === "string") held[k.toLowerCase()] = v;
+          resolve({ held });
+        } catch {
+          resolve({ error: "bad JSON" });
+        }
+      });
+    });
+    req.once("timeout", () => req.destroy(new Error("timeout")));
+    req.once("error", (err) => resolve({ error: err.message }));
+  });
+}
+
 function answerKey(): string {
   const tunnels = getDnsGatewayTunnels().map((t) => `${t.ip}:${tunnelStateOf(t.ip).up}`);
   return `${healthyGatewayIps().join(",")}|${tunnels.join(",")}`;
 }
 
-/** Check every gateway and provider once; true when some answer may have changed. */
-export async function checkGateways(): Promise<boolean> {
+let coverageTick = 0;
+
+/**
+ * Check every gateway and provider once; true when some answer may have changed.
+ * `liveLabels`, when given, is read every COVERAGE_EVERY calls to refresh each gateway's
+ * fallback coverage.
+ */
+export async function checkGateways(liveLabels?: () => Promise<LiveLabel[]>): Promise<boolean> {
   const before = answerKey();
   const ips = getDnsGatewayIps();
   const tunnels = getDnsGatewayTunnels().filter((t) => t.providerUrl);
@@ -287,20 +394,46 @@ export async function checkGateways(): Promise<boolean> {
     }),
     ...tunnels.map(async (t) => apply(tunnelStates, t.ip, await checkProvider(t.providerUrl!), "tunnel provider of")),
   ]);
+  if (liveLabels && coverageTick++ % COVERAGE_EVERY === 0) {
+    await refreshCoverage(ips, await liveLabels());
+  }
   return answerKey() !== before;
+}
+
+/** Read each gateway's fallback list and store its coverage (logged when it changes). */
+async function refreshCoverage(ips: string[], live: LiveLabel[]): Promise<void> {
+  const graceMs = getGatewayFallbackGraceMinutes() * 60_000;
+  await Promise.all(ips.map(async (ip) => {
+    const { error, held } = await fetchFallbackList(ip);
+    const now = new Date();
+    const coverage: GatewayCoverage = held
+      ? fallbackCoverage(held, live, graceMs, now)
+      : { total: 0, covered: 0, missing: [], checkedAt: now.toISOString(), error };
+    const prev = stateOf(ip);
+    states.set(ip, { ...prev, coverage });
+    const was = prev.coverage;
+    if (!was || was.covered !== coverage.covered || was.total !== coverage.total || was.error !== coverage.error) {
+      console.log(`[gateways] gateway ${ip} fallback coverage `
+        + (coverage.error ? `unknown (${coverage.error})` : `${coverage.covered}/${coverage.total}`
+          + (coverage.missing.length ? `, missing ${coverage.missing.join(",")}` : "")));
+    }
+  }));
 }
 
 let timer: NodeJS.Timeout | null = null;
 
-/** Start checking; `onChange` runs when some answer may have changed (re-sync the zones). */
-export function startGatewayHealth(onChange: () => void): void {
+/**
+ * Start checking; `onChange` runs when some answer may have changed (re-sync the zones).
+ * `liveLabels` feeds the fallback coverage (see checkGateways).
+ */
+export function startGatewayHealth(onChange: () => void, liveLabels?: () => Promise<LiveLabel[]>): void {
   if (timer || getDnsGatewayIps().length < 2) return; // one gateway: nothing to fail over to
   let running = false;
   const tick = async () => {
     if (running) return;
     running = true;
     try {
-      if (await checkGateways()) {
+      if (await checkGateways(liveLabels)) {
         const tunnelsDown = getDnsGatewayTunnels().filter((t) => !tunnelStateOf(t.ip).up).map((t) => t.ip);
         console.log(`[gateways] answering ${healthyGatewayIps().join(",")}`
           + (tunnelsDown.length ? `, NAT boxes not through ${tunnelsDown.join(",")} (provider down)` : ""));
